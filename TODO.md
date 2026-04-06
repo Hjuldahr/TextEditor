@@ -1,0 +1,1 @@
+Add features from core to textEditor
