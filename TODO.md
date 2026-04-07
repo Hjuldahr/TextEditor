@@ -1,1 +1,1 @@
-Add features from core to textEditor
+Move text-editor v1 to v2

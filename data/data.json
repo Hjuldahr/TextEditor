@@ -1,13 +1,9 @@
 {
-  "OPEN_FILES": [
-    "C:\\Users\\robert\\Documents\\test4.txt",
+  "autosave enabled": false,
+  "open files": [
     "C:\\Users\\robert\\Documents\\test.txt",
     "C:\\Users\\robert\\Documents\\test2.txt",
     "C:\\Users\\robert\\Documents\\test3.txt"
   ],
-  "RECENT_FILES": [
-    "C:\\Users\\robert\\Documents\\test3.txt",
-    "C:\\Users\\robert\\Documents\\test2.txt",
-    "C:\\Users\\robert\\Documents\\test.txt"
-  ]
+  "recent files": []
 }

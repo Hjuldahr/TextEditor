@@ -25,15 +25,22 @@ class TextEditor():
         self.app_path = None
         self.current_zoom = self.DEFAULT_ZOOM
         self.tabs = {}
+        self.drag_data = {"index": None}
         self.recent_files = []
         self.context_menu = None
+        self.tab_menu = None
         self.typing_timer = None
         
         self.root = tk.Tk(className=self.APP_TITLE)
+        
         self.autosave = tk.BooleanVar()
         self.current_font = font.Font(family="Consolas", size=12)
+        
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(expand=True, fill='both')
+        self.notebook.bind("<Button-1>", self.on_tab_click)
+        self.notebook.bind("<B1-Motion>", self.reorder_tabs)
+        
         self.set_app_size()
         self.set_app_title()
         self.set_menubar()
@@ -44,6 +51,33 @@ class TextEditor():
     # =========================
     # CORE TAB SYSTEM
     # =========================
+    def on_tab_click(self, event):
+        """Store the index of the tab where the user first clicked."""
+        try:
+            self.drag_data["index"] = self.notebook.index(f"@{event.x},{event.y}")
+        except tk.TclError:
+            self.drag_data["index"] = None
+
+    def reorder_tabs(self, event):
+        """Move the tab only if it's dragged over a neighbor."""
+        if self.drag_data["index"] is None:
+            return
+
+        try:
+            # Get the index of the tab currently under the mouse
+            over_index = self.notebook.index(f"@{event.x},{event.y}")
+            
+            # Only move if the mouse has moved to a different tab position
+            if over_index != self.drag_data["index"]:
+                # notebook.tabs() returns a list of internal widget names
+                child_id = self.notebook.tabs()[self.drag_data["index"]]
+                self.notebook.insert(over_index, child_id)
+                
+                # Update our tracker to the new position
+                self.drag_data["index"] = over_index
+        except tk.TclError:
+            pass
+    
     def on_key_release(self, event):
         # Cancel the previous timer
         if self.typing_timer:
@@ -65,15 +99,19 @@ class TextEditor():
                     break
     
     def create_new_tab(self, content: str = "", file: Path = None) -> None:
+        if any(tab['file'] == file for tab in self.tabs.values()):
+            return
+        
         filename = file.name if file else self.DEFAULT_FILENAME
 
         frame = tk.Frame(self.notebook)
         
+        frame.bind("<Button-3>")
+        
         text_widget = tk.Text(frame, wrap="word", undo=True, font=self.current_font)
         text_widget.pack(expand=True, fill="both")
         
-        text_widget.bind("<Button-3>", self.show_context_menu)
-        
+        #text_widget.bind("<Button-3>", self.show_tab_menu)
         text_widget.bind("<KeyRelease>", self.on_key_release)
 
         # Step 1: Insert content
@@ -192,29 +230,56 @@ class TextEditor():
         view_menu.add_command(label="Goto Line", command=self.scroll_to_cmd)
         view_menu.add_command(label="Goto Top", accelerator="Ctrl+Home", command=self.scroll_top_cmd)
         view_menu.add_command(label="Goto End", accelerator="Ctrl+End", command=self.scroll_end_cmd)
-        view_menu.add_separator()
-        view_menu.add_command(label="Web Search", accelerator="Ctrl+/", command=self.web_cmd)
-        view_menu.add_command(label="Word Count", accelerator="Ctrl+W", command=self.word_count_cmd)
 
         menubar.add_cascade(label="View", menu=view_menu)
+        
+        insert_menu = tk.Menu(menubar, tearoff=0)
+        insert_menu.add_command(label="Table", command=None)
+        insert_menu.add_command(label="Seperator", command=None)
+        insert_menu.add_command(label="Hyperlink", command=None)
+        insert_menu.add_command(label="Date", command=None)
+        insert_menu.add_command(label="Time", command=None)
+        
+        menubar.add_cascade(label="Insert", menu=insert_menu)
+        
+        format_menu = tk.Menu(menubar, tearoff=0)
+        format_menu.add_command(label="Heading 1", command=None)
+        format_menu.add_command(label="Heading 2", command=None)
+        format_menu.add_command(label="Heading 3", command=None)
+        format_menu.add_separator()
+        format_menu.add_command(label="Bold", accelerator="Ctrl+B", command=self.insert_bold_cmd)
+        format_menu.add_command(label="Italic", accelerator="Ctrl+I", command=self.insert_italic_cmd)
+        format_menu.add_command(label="Underline", accelerator="Ctrl+U", command=None)
+        format_menu.add_command(label="Strikethrough", command=None)
+        
+        menubar.add_cascade(label="Format", menu=format_menu)
+
+        tool_menu = tk.Menu(menubar, tearoff=0)
+        tool_menu.add_command(label="Word Count", accelerator="Ctrl+W", command=self.word_count_cmd)
+        tool_menu.add_command(label="Web Search", accelerator="Ctrl+/", command=self.web_cmd)
+
+        help_menu = tk.Menu(menubar, tearoff=0)
+        help_menu.add_command(label="About TextEditor", command=None)
+
+        menubar.add_cascade(label="Tool", menu=tool_menu)
+        
         self.root.config(menu=menubar)
 
     def set_context_menu(self):
         self.context_menu = tk.Menu(self.root, tearoff=0)
-        self.context_menu.add_command(label="Cut", accelerator="Ctrl+X", command=lambda: self.cut_cmd)
-        self.context_menu.add_command(label="Copy", accelerator="Ctrl+C", command=lambda: self.copy_cmd)
-        self.context_menu.add_command(label="Paste", accelerator="Ctrl+V", command=lambda: self.paste_cmd)
+        self.context_menu.add_command(label="Cut", accelerator="Ctrl+X", command=self.cut_cmd)
+        self.context_menu.add_command(label="Copy", accelerator="Ctrl+C", command=self.copy_cmd)
+        self.context_menu.add_command(label="Paste", accelerator="Ctrl+V", command=self.paste_cmd)
         self.context_menu.add_separator()
         self.context_menu.add_command(label="Web Search", accelerator="Ctrl+/", command=self.web_cmd)
         
     def show_context_menu(self, event):
+        event.widget.focus_set()
         text = self.get_current_text_widget()
-        # Check if there is an active selection
         has_selection = text.tag_ranges("sel")
         
         state = "normal" if has_selection else "disabled"
         
-        # Dynamically update the menu state before showing it
         self.context_menu.entryconfigure("Cut", state=state)
         self.context_menu.entryconfigure("Copy", state=state)
         self.context_menu.entryconfigure("Web Search", state=state)
@@ -223,6 +288,14 @@ class TextEditor():
             self.context_menu.tk_popup(event.x_root, event.y_root)
         finally:
             self.context_menu.grab_release()
+            
+    def set_context_menu(self):
+        self.context_menu = tk.Menu(self.root, tearoff=0)
+        self.context_menu.add_command(label="Cut", accelerator="Ctrl+X", command=self.cut_cmd)
+        self.context_menu.add_command(label="Copy", accelerator="Ctrl+C", command=self.copy_cmd)
+        self.context_menu.add_command(label="Paste", accelerator="Ctrl+V", command=self.paste_cmd)
+        self.context_menu.add_separator()
+        self.context_menu.add_command(label="Web Search", accelerator="Ctrl+/", command=self.web_cmd)        
 
     # =========================
     # HOTKEYS
@@ -236,9 +309,6 @@ class TextEditor():
         self.root.bind("<Control-Alt-s>", self.save_all_files_cmd)
         self.root.bind("<Control-w>", self.word_count_cmd)
 
-        self.root.bind("<Control-x>", self.cut_cmd)
-        self.root.bind("<Control-c>", self.copy_cmd)
-        self.root.bind("<Control-v>", self.paste_cmd)
         self.root.bind("<Control-a>", self.select_all_cmd)
 
         self.root.bind("<Control-slash>", self.web_cmd)
@@ -254,7 +324,96 @@ class TextEditor():
         self.root.bind("<Control-Home>", self.scroll_top_cmd)
         self.root.bind("<Control-End>", self.scroll_end_cmd)
 
+        self.root.bind("<Control-b>", self.insert_bold_cmd)
+        self.root.bind_all("<Control-i>", self.insert_italic_cmd)
+
         self.root.bind("<Escape>", self.close_cmd)
+
+    # =========================
+    # INSERT COMMANDS
+    # =========================
+
+    def insert_italic_cmd(self, event=None) -> None:
+        file = self.get_current_filepath()
+        widget = self.get_current_text_widget()
+        
+        # 1. Define tags based on file type
+        if file.suffix in ('.html', '.ejs'):
+            prefix, suffix = "<em>", "</em>"
+        else:
+            prefix, suffix = "*", "*"
+
+        try:
+            start = widget.index("sel.first")
+            end = widget.index("sel.last")
+            
+            # 2. Get the actual selected text
+            selection = widget.get(start, end)
+
+            # 3. CASE A: Tags are INSIDE the selection (e.g., "*text*" is highlighted)
+            if selection.startswith(prefix) and selection.endswith(suffix):
+                unwrapped = selection[len(prefix) : -len(suffix)]
+                widget.delete(start, end)
+                widget.insert(start, unwrapped)
+                
+            else:
+                # 4. CASE B: Check if tags are OUTSIDE the selection (e.g., "text" is highlighted)
+                current_pre = widget.get(f"{start}-{len(prefix)}c", start)
+                current_suf = widget.get(end, f"{end}+{len(suffix)}c")
+
+                if current_pre == prefix and current_suf == suffix:
+                    widget.delete(end, f"{end}+{len(suffix)}c")
+                    widget.delete(f"{start}-{len(prefix)}c", start)
+                else:
+                    # 5. CASE C: Not wrapped at all, so add them
+                    widget.insert(end, suffix)
+                    widget.insert(start, prefix)
+
+        except tk.TclError:
+            print("No text selected")
+            
+        return "break"
+
+    def insert_bold_cmd(self, event=None) -> None:
+        file = self.get_current_filepath()
+        widget = self.get_current_text_widget()
+        
+        # 1. Define tags based on file type
+        if file.suffix in ('.html', '.ejs'):
+            prefix, suffix = "<strong>", "</strong>"
+        else:
+            prefix, suffix = "**", "**"
+
+        try:
+            start = widget.index("sel.first")
+            end = widget.index("sel.last")
+            
+            # 2. Get the actual selected text
+            selection = widget.get(start, end)
+
+            # 3. CASE A: Tags are INSIDE the selection (e.g., "**text**" is highlighted)
+            if selection.startswith(prefix) and selection.endswith(suffix):
+                unwrapped = selection[len(prefix) : -len(suffix)]
+                widget.delete(start, end)
+                widget.insert(start, unwrapped)
+                
+            else:
+                # 4. CASE B: Check if tags are OUTSIDE the selection (e.g., "text" is highlighted)
+                current_pre = widget.get(f"{start}-{len(prefix)}c", start)
+                current_suf = widget.get(end, f"{end}+{len(suffix)}c")
+
+                if current_pre == prefix and current_suf == suffix:
+                    widget.delete(end, f"{end}+{len(suffix)}c")
+                    widget.delete(f"{start}-{len(prefix)}c", start)
+                else:
+                    # 5. CASE C: Not wrapped at all, so add them
+                    widget.insert(end, suffix)
+                    widget.insert(start, prefix)
+
+        except tk.TclError:
+            print("No text selected")
+            
+        return "break"
 
     # =========================
     # FILE COMMANDS
@@ -286,7 +445,7 @@ class TextEditor():
     def open_file_cmd(self, event=None) -> None:
         for raw_filepath in filedialog.askopenfilenames():
             file = Path(raw_filepath)
-            content = file.read_text(encoding="utf-8", newline="\n")
+            content = file.read_text(encoding="utf-8")
             self.create_new_tab(content, file)
 
             # Update session
@@ -299,19 +458,33 @@ class TextEditor():
                 
         # Move this OUTSIDE the loop so the menu only rebuilds once
         self.rebuild_recent_file_submenu()
-                
+    
+    def reopen_files_cmd(self) -> None:
+        for file in self.recent_files:
+            content = file.read_text(encoding="utf-8")
+            self.create_new_tab(content, file)
+    
+    def clear_recent_files(self) -> None:
+        self.recent_files.clear()
+        self.rebuild_recent_file_submenu()
+
     def rebuild_recent_file_submenu(self) -> None:
         self.recent_file_submenu.delete(0, "end")
         
         def open_file(file):
-            content = file.read_text(encoding="utf-8", newline="\n")
+            content = file.read_text(encoding="utf-8")
             self.create_new_tab(content, file)
+        
+        state = state = "normal" if len(self.recent_files) > 0 else "disabled"
+        
+        self.recent_file_submenu.add_command(label="Reopen Recent...", command=self.reopen_files_cmd, state=state)  
+        self.recent_file_submenu.add_separator()
         
         for file in self.recent_files:
             self.recent_file_submenu.add_command(label=str(file), command=lambda f=file: open_file(f))      
-        
-    def reopen_files_cmd(self, event=None) -> None:  
-        print("Reopen Files")           
+            
+        self.recent_file_submenu.add_separator()
+        self.recent_file_submenu.add_command(label="Clear Recent...", command=self.clear_recent_files, state=state)         
 
     def save_all_files_cmd(self, event=None) -> None:
         for tab in self.tabs.keys():
@@ -434,17 +607,26 @@ class TextEditor():
     # =========================
     # EDIT COMMANDS
     # =========================
+    # These just straightup don't work regardless of how I code them
+    
     def cut_cmd(self, event=None) -> str:
-        pass
+        widget = self.get_current_text_widget()
+        widget.event_generate("<<Cut>>")
+        widget.update()
 
     def copy_cmd(self, event=None) -> str:
-        pass
+        widget = self.get_current_text_widget()
+        widget.event_generate("<<Copy>>")
+        widget.update()
 
     def paste_cmd(self, event=None) -> str:
-        pass
+        widget = self.get_current_text_widget()
+        widget.event_generate("<<Paste>>")
+        widget.update()
 
     def select_all_cmd(self, event=None) -> None:
         pass
+    
 
     # =========================
     # VIEW
@@ -589,6 +771,7 @@ class TextEditor():
             app_data_path = self.app_path / 'data' / 'data.json'
             app_data_path.parent.mkdir(parents=True, exist_ok=True)
             save_data = {
+                "AUTOSAVE_ENABLED": self.autosave.get(),
                 "OPEN_FILES": [str(tab['file']) for tab in self.tabs.values()],
                 "RECENT_FILES": [str(file) for file in self.recent_files]
             }
@@ -606,6 +789,9 @@ class TextEditor():
         
         try:
             app_data = json.loads(app_data_path.read_text(encoding="utf-8"))
+            
+            #"AUTOSAVE_ENABLED": self.autosave.get(),
+            self.autosave.initialize(app_data.get("AUTOSAVE_ENABLED", False))
             
             raw = app_data.get("OPEN_FILES", [])
             filtered = filter(Path.exists, map(Path, raw))
