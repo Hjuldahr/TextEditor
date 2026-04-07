@@ -1,9 +1,18 @@
 {
   "autosave enabled": false,
   "open files": [
-    "C:\\Users\\robert\\Documents\\test.txt",
     "C:\\Users\\robert\\Documents\\test2.txt",
     "C:\\Users\\robert\\Documents\\test3.txt"
   ],
-  "recent files": []
+  "recent files": [
+    "C:\\Users\\robert\\Documents\\test3.txt",
+    "C:\\Users\\robert\\Documents\\test2.txt"
+  ],
+  "prev open files": [
+    "C:\\Users\\robert\\Documents\\test4.txt",
+    "C:\\Users\\robert\\Documents\\test.txt",
+    "C:\\Users\\robert\\Documents\\test.json",
+    "C:\\Users\\robert\\Documents\\VS Code Files\\InharNumbers\\InharNumbers.py",
+    "C:\\Users\\robert\\Documents\\VS Code Files\\TextEditor\\TODO.md"
+  ]
 }

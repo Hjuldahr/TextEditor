@@ -1,3 +1,13 @@
+"""
+TODO
+edit_menu.add_command(label="Find [Here]", accelerator="Ctrl+F", command=self.find_cmd)
+        edit_menu.add_command(label="Replace [Here]", accelerator="Ctrl+R", command=self.replace_cmd)
+        edit_menu.add_command(label="Find [3 Files]", accelerator="Ctrl+Shift+F", command=self.all_file_find_cmd)
+        edit_menu.add_command(label="Replace [3 Files]", accelerator="Ctrl+Shift+R", command=self.all_file_replace_cmd)
+        edit_menu.add_command(label="Goto Line...", accelerator="Ctrl+G", command=self.goto_cmd)
+"""
+
+from collections import deque
 import sys
 import json
 import re
@@ -12,6 +22,8 @@ from PyQt6.QtCore import QTimer, Qt
 class TextEditor(QMainWindow):
     APP_TITLE = "TextEditor"
     DEFAULT_FILENAME = "Untitled"
+    MAX_VISIBLE_RECENT_FILES = 10
+    MAX_RECENT_FILES = 100
 
     def __init__(self):
         super().__init__()
@@ -24,8 +36,9 @@ class TextEditor(QMainWindow):
         self.setWindowTitle(self.APP_TITLE)
         self.resize(800, 600)
 
-        self.tabs = {}  # widget -> {file, saved}
-        self.recent_files = []
+        self.tabs = {}  # widget -> {file, saved}, order should be preserved when moving tabs
+        self.closed_this_session = [] # order is not important, as its already session scoped
+        self.recent_files = [] # chronologically ordered, multi-session context
         self.current_zoom = 100
         self.autosave_enabled = False
 
@@ -44,10 +57,88 @@ class TextEditor(QMainWindow):
 
         self.create_menus()
         self.load_app_data()
+        self.rebuild_recent_files()
 
     # =========================
     # TAB SYSTEM
     # =========================
+    def maybe_save_editor(self, editor):
+        data = self.tabs[editor]
+
+        if data["saved"]:
+            return True
+
+        reply = QMessageBox.question(
+            self,
+            "Unsaved Changes",
+            f"Save changes to {data['file'].name if data['file'] else 'Untitled'}?",
+            QMessageBox.StandardButton.Save |
+            QMessageBox.StandardButton.Discard |
+            QMessageBox.StandardButton.Cancel
+        )
+
+        if reply == QMessageBox.StandardButton.Save:
+            return self.save_editor(editor)
+        elif reply == QMessageBox.StandardButton.Cancel:
+            return False
+
+        return True
+    
+    def close_current_tab(self):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        if not self.maybe_save_editor(editor):
+            return
+
+        index = self.tab_widget.indexOf(editor)
+        self.tab_widget.removeTab(index)
+        
+        if self.tabs[editor]['file'] in self.closed_this_session:
+            self.closed_this_session.remove(self.tabs[editor]['file'])
+        self.closed_this_session.append(self.tabs[editor]['file'])
+        
+        del self.tabs[editor]
+
+        if self.tab_widget.count() == 0:
+            self.create_new_tab()
+        self.rebuild_recent_files()
+    
+    def close_all_tabs(self):
+        editors = list(self.tabs.keys())
+        not_saved = [editor for editor in editors if not self.tabs[editor]["saved"]]
+
+        if not_saved:
+            reply = QMessageBox.question(
+                self,
+                "Unsaved Changes",
+                f"Save changes to {len(not_saved)} file{'' if len(not_saved) == 1 else 's'}?",
+                QMessageBox.StandardButton.Save |
+                QMessageBox.StandardButton.Cancel
+            )
+            if reply == QMessageBox.StandardButton.Cancel:
+                return False
+
+            if reply == QMessageBox.StandardButton.Save:
+                for editor in not_saved:
+                    if not self.save_editor(editor):
+                        return False  # user canceled save dialog
+
+        for editor in editors:
+            index = self.tab_widget.indexOf(editor)
+            self.tab_widget.removeTab(index)
+            
+            if self.tabs[editor]['file'] in self.closed_this_session:
+                self.closed_this_session.remove(self.tabs[editor]['file'])
+            self.closed_this_session.append(self.tabs[editor]['file'])
+            
+            del self.tabs[editor]
+
+        self.create_new_tab()
+        self.rebuild_recent_files()
+        return True
+    
     def close_tab(self, index):
         editor = self.tab_widget.widget(index)
         data = self.tabs[editor]
@@ -68,13 +159,28 @@ class TextEditor(QMainWindow):
             elif reply == QMessageBox.StandardButton.Cancel:
                 return
 
+        file = data['file']
         self.tab_widget.removeTab(index)
         del self.tabs[editor]
 
+        # Only track real files
+        if file:
+            if file in self.closed_this_session:
+                self.closed_this_session.remove(file)
+            self.closed_this_session.append(file)
+            # Remove from recent temporarily (we want it under "reopen closed" until reopened)
+            if file in self.recent_files:
+                self.recent_files.remove(file)
+
         if self.tab_widget.count() == 0:
             self.create_new_tab()
+
+        self.rebuild_recent_files()
     
     def create_new_tab(self, content="", file=None):
+        if any(file == tab["file"] for tab in self.tabs.values()):
+            return
+        
         editor = QTextEdit()
         editor.setFont(self.font)
         editor.setPlainText(content)
@@ -90,6 +196,15 @@ class TextEditor(QMainWindow):
         editor.textChanged.connect(lambda e=editor: self.on_text_changed(e))
         editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         editor.customContextMenuRequested.connect(self.show_context_menu)
+        
+        # File is now open → remove from closed_this_session if present
+        if file:
+            if file in self.closed_this_session:
+                self.closed_this_session.remove(file)
+            self.push_recent_file(file)
+            self.truncate_recent_files()
+        
+        self.rebuild_recent_files()
 
     def get_current_editor(self):
         return self.tab_widget.currentWidget()
@@ -134,36 +249,46 @@ class TextEditor(QMainWindow):
     def create_menus(self):
         menubar = self.menuBar()
 
-        file_menu = menubar.addMenu("File")
+        self.file_menu = menubar.addMenu("File")
 
-        file_menu.addAction(self.create_action("New", self.new_file, "Ctrl+N"))
-        file_menu.addAction(self.create_action("Open", self.open_file, "Ctrl+O"))
-        file_menu.addAction(self.create_action("Save", self.save_file, "Ctrl+S"))
-        file_menu.addAction(self.create_action("Save As", self.save_file_as, "Ctrl+Alt+S"))
-        file_menu.addAction(self.create_action("Save All", self.save_all_files, "Ctrl+Shift+S"))
-        file_menu.addSeparator()
-
+        self.file_menu.addAction(self.create_action("New", self.new_file, "Ctrl+N"))
+        
+        self.file_menu.addSeparator()
+        self.file_menu.addAction(self.create_action("Open...", self.open_file, "Ctrl+O"))
+        self.recent_file_menu = QMenu("Open Recent", self)
+        self.file_menu.addMenu(self.recent_file_menu)
+        
+        self.file_menu.addSeparator()
+        self.file_menu.addAction(self.create_action("Save", self.save_file, "Ctrl+S"))
+        self.file_menu.addAction(self.create_action("Save As...", self.save_file_as, "Ctrl+Alt+S"))
+        self.file_menu.addAction(self.create_action("Save All", self.save_all_files, "Ctrl+Shift+S"))
+        
+        self.file_menu.addSeparator()
+        self.file_menu.addAction(self.create_action("Close Tab", self.close_current_tab, "Ctrl+T"))
+        self.file_menu.addAction(self.create_action("Close All", self.close_all_tabs, "Ctrl+Shift+T"))
+        
+        self.file_menu.addSeparator()
         autosave_action = QAction("Auto Save", self)
         autosave_action.setCheckable(True)
         autosave_action.triggered.connect(self.toggle_autosave)
-        file_menu.addAction(autosave_action)
+        self.file_menu.addAction(autosave_action)
 
-        file_menu.addSeparator()
-        file_menu.addAction(self.create_action("Exit", self.close))
+        self.file_menu.addSeparator()
+        self.file_menu.addAction(self.create_action("Exit", self.close, "Alt+F4"))
 
-        edit_menu = menubar.addMenu("Edit")
-        edit_menu.addAction(self.create_action("Cut", lambda: self.get_current_editor().cut(), "Ctrl+X"))
-        edit_menu.addAction(self.create_action("Copy", lambda: self.get_current_editor().copy(), "Ctrl+C"))
-        edit_menu.addAction(self.create_action("Paste", lambda: self.get_current_editor().paste(), "Ctrl+V"))
+        self.edit_menu = menubar.addMenu("Edit")
+        self.edit_menu.addAction(self.create_action("Cut", lambda: self.get_current_editor().cut(), "Ctrl+X"))
+        self.edit_menu.addAction(self.create_action("Copy", lambda: self.get_current_editor().copy(), "Ctrl+C"))
+        self.edit_menu.addAction(self.create_action("Paste", lambda: self.get_current_editor().paste(), "Ctrl+V"))
 
-        view_menu = menubar.addMenu("View")
-        view_menu.addAction(self.create_action("Zoom In", self.zoom_in, "Ctrl++"))
-        view_menu.addAction(self.create_action("Zoom Out", self.zoom_out, "Ctrl+-"))
-        view_menu.addAction(self.create_action("Reset Zoom", self.reset_zoom, "Ctrl+0"))
+        self.view_menu = menubar.addMenu("View")
+        self.view_menu.addAction(self.create_action("Zoom In", self.zoom_in, "Ctrl++"))
+        self.view_menu.addAction(self.create_action("Zoom Out", self.zoom_out, "Ctrl+-"))
+        self.view_menu.addAction(self.create_action("Reset Zoom", self.reset_zoom, "Ctrl+0"))
 
-        tools_menu = menubar.addMenu("Tools")
-        tools_menu.addAction(self.create_action("Word Count", self.word_count, "Ctrl+W"))
-        tools_menu.addAction(self.create_action("Web Search", self.web_search, "Ctrl+/"))
+        self.tools_menu = menubar.addMenu("Tools")
+        self.tools_menu.addAction(self.create_action("Word Count", self.word_count, "Ctrl+W"))
+        self.tools_menu.addAction(self.create_action("Web Search", self.web_search, "Ctrl+/"))
 
     def create_action(self, name, func, shortcut=None):
         action = QAction(name, self)
@@ -173,11 +298,82 @@ class TextEditor(QMainWindow):
         return action
 
     # =========================
+    # RECENT FILE MENU
+    # =========================
+    
+    # rebuild_recent_files: always show closed first, then recent
+    def rebuild_recent_files(self):
+        self.recent_file_menu.clear()
+        
+        self.recent_file_menu.addAction(
+            self.create_action("Reopen Closed This Session", self.reopen_closed_this_session)
+        )
+        self.recent_file_menu.addSeparator()
+        
+        # closed files menu
+        for file in self.closed_this_session:
+            self.recent_file_menu.addAction(
+                self.create_action(file.name, lambda _, f=file: self.headless_open_file(f))
+            )
+
+        self.recent_file_menu.addSeparator()
+        
+        # recent files menu
+        for file in self.recent_files[:self.MAX_VISIBLE_RECENT_FILES]:
+            if file in self.closed_this_session:
+                continue
+            self.recent_file_menu.addAction(
+                self.create_action(file.name, lambda _, f=file: self.headless_open_file(f))
+            )
+        
+        self.recent_file_menu.addSeparator()
+        self.recent_file_menu.addAction(self.create_action("Show More", self.show_more_recent))
+        self.recent_file_menu.addSeparator()
+        self.recent_file_menu.addAction(self.create_action("Clear Previous Files...", self.clear_recent))
+
+    def reopen_closed_this_session(self):
+        # sort for predictable order if needed
+        files_to_reopen = list(self.closed_this_session)
+        for file in files_to_reopen:
+            try:
+                content = file.read_text(encoding="utf-8")
+                self.create_new_tab(content, file)
+            except Exception:
+                pass
+            if file in self.closed_this_session:
+                self.closed_this_session.remove(file)
+            self.push_recent_file(file)
+        self.truncate_recent_files()
+        self.rebuild_recent_files()
+    
+    def show_more_recent(self):
+        pass
+    
+    def clear_recent(self):
+        self.recent_files.clear()
+        self.rebuild_recent_files()
+
+    # =========================
     # FILE OPS
     # =========================
+    def push_recent_file(self, file):
+        if file in self.recent_files:
+            self.recent_files.remove(file)
+        self.recent_files.insert(0, file)
+        
+    def truncate_recent_files(self):
+        self.recent_files = self.recent_files[:self.MAX_RECENT_FILES]
+    
+    def headless_open_file(self, file):
+        content = file.read_text(encoding="utf-8")
+        self.create_new_tab(content, file)
+
+        self.push_recent_file(file)
+        self.truncate_recent_files()
+    
     def new_file(self):
         self.create_new_tab()
-
+    
     def open_file(self):
         files, _ = QFileDialog.getOpenFileNames(self)
 
@@ -185,6 +381,10 @@ class TextEditor(QMainWindow):
             file = Path(path)
             content = file.read_text(encoding="utf-8")
             self.create_new_tab(content, file)
+            
+            self.push_recent_file(file)
+        self.truncate_recent_files()
+        self.rebuild_recent_files()
 
     def save_file(self):
         editor = self.get_current_editor()
@@ -234,14 +434,14 @@ class TextEditor(QMainWindow):
         editor = self.get_current_editor()
         menu = QMenu()
 
-        menu.addAction("Cut", editor.cut)
-        menu.addAction("Copy", editor.copy)
-        menu.addAction("Paste", editor.paste)
+        menu.addAction("Cut", editor.cut, "Ctrl+X")
+        menu.addAction("Copy", editor.copy, "Ctrl+C")
+        menu.addAction("Paste", editor.paste, "Ctrl+V")
         menu.addSeparator()
         menu.addAction("Web Search", self.web_search)
 
         menu.exec(editor.mapToGlobal(pos))
-
+    
     # =========================
     # TOOLS
     # =========================
@@ -349,34 +549,32 @@ class TextEditor(QMainWindow):
     def load_app_data(self):
         try:
             app_data_path = self.app_location / 'data' / 'data.json'
-            
             app_data = json.loads(app_data_path.read_text(encoding="utf-8")) if app_data_path.exists() else {}
             
             self.autosave_enabled = app_data.get("autosave enabled", False)
             
-            raw = app_data.get("open files", [])
-            filtered = filter(Path.exists, map(Path, raw))
-            open_files = list(filtered)
+            open_files = [Path(f) for f in app_data.get("open files", [])]
+            recent_files = [Path(f) for f in app_data.get("recent files", [])]
+            closed_this_session = [Path(f) for f in app_data.get("prev open files", [])]
+
+            all_existing = {p for p in {*open_files, *recent_files, *closed_this_session} if p.exists()}
             
-            raw = app_data.get("recent files", [])
-            filtered = filter(Path.exists, map(Path, raw))
-            self.recent_files = list(filtered)
+            open_files = [p for p in open_files if p in all_existing]
+            self.recent_files = [p for p in recent_files if p in all_existing]
+            self.closed_this_session = [p for p in closed_this_session if p in all_existing]
             
         except Exception as e:
-            print(e)
-            open_files = []
-            self.recent_files = []
+            print(f"Error loading data: {e}")
+            open_files, self.recent_files, self.closed_this_session = [], [], []
         
-        if len(open_files) == 0:
-            # New Session
+        if not open_files:
             self.create_new_tab()
         else:
-            # Restore Old Session
             for file in open_files:
-                content = file.read_text(encoding="utf-8")
-                self.create_new_tab(content, file)
-            
-        #self.rebuild_recent_file_submenu()
+                try:
+                    self.create_new_tab(file.read_text(encoding="utf-8"), file)
+                except Exception:
+                    pass
         
     def save_app_data(self):
         try:
@@ -386,7 +584,8 @@ class TextEditor(QMainWindow):
             app_data = {
                 "autosave enabled": self.autosave_enabled,
                 "open files": [str(tab['file']) for tab in self.tabs.values()],
-                "recent files": [str(file) for file in self.recent_files]
+                "recent files": [str(file) for file in self.recent_files],
+                "prev open files": [str(file) for file in self.closed_this_session]
             }
             
             app_data_path.write_text(json.dumps(app_data, indent=2), encoding="utf-8")
