@@ -1,4 +1,4 @@
-from collections import deque
+from datetime import datetime, timezone
 import sys
 import json
 import re
@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from PyQt6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton, QTextEdit, QTabWidget, QFileDialog, QMessageBox, QMenu
 from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence, QTextCharFormat, QTextCursor, QTextDocument
-from PyQt6.QtCore import QTimer, Qt
+from PyQt6.QtCore import QEvent, QTimer, Qt
 
 class FindBar(QFrame):
     def __init__(self, parent=None):
@@ -112,6 +112,12 @@ class TextEditor(QMainWindow):
     DEFAULT_FILENAME = "Untitled"
     MAX_VISIBLE_RECENT_FILES = 10
     MAX_RECENT_FILES = 100
+    
+    MIN_ZOOM = 10
+    MAX_ZOOM = 500
+    ZOOM_STEP_SIZE = 10
+    DEFAULT_ZOOM = 100
+    ZOOM_FONT_MOD = 12
 
     def __init__(self):
         super().__init__()
@@ -127,7 +133,7 @@ class TextEditor(QMainWindow):
         self.tabs = {}  # widget -> {file, saved}, order should be preserved when moving tabs
         self.closed_this_session = [] # order is not important, as its already session scoped
         self.recent_files = [] # chronologically ordered, multi-session context
-        self.current_zoom = 100
+        self.current_zoom = self.DEFAULT_ZOOM
         self.editor_enabled = True
         self.autosave_enabled = False
         self.search_state = {
@@ -135,8 +141,16 @@ class TextEditor(QMainWindow):
             "results": [],
             "index": -1
         }
+        
+        self.status = self.statusBar()
+        self.cursor_status = QLabel()
+        self.status.addPermanentWidget(self.cursor_status)
+        self.zoom_status = QLabel()
+        self.status.addPermanentWidget(self.zoom_status)
+        self.filetype_status = QLabel()
+        self.status.addPermanentWidget(self.filetype_status)
 
-        self.font = QFont("Consolas", 12)
+        self.font = QFont("Consolas", self.ZOOM_FONT_MOD)
 
         # Central widget
         self.tab_widget = QTabWidget()
@@ -163,17 +177,6 @@ class TextEditor(QMainWindow):
     # =========================
     def get_doc_id(self, editor):
         return id(editor.document())
-    
-    def on_tab_changed(self, index):
-        editor = self.get_current_editor()
-        if not editor:
-            return
-
-        self.clear_search()
-        
-        text = self.find_bar.input.text()
-        if text:
-            self.search(text)
     
     def maybe_save_editor(self, editor):
         data = self.tabs[editor]
@@ -296,6 +299,7 @@ class TextEditor(QMainWindow):
         
         editor = QTextEdit()
         editor.setFont(self.font)
+        editor.viewport().installEventFilter(self)
         editor.setPlainText(content)
 
         index = self.tab_widget.addTab(editor, file.name if file else self.DEFAULT_FILENAME)
@@ -307,6 +311,7 @@ class TextEditor(QMainWindow):
         }
 
         editor.textChanged.connect(lambda e=editor: self.on_text_changed(e))
+        editor.cursorPositionChanged.connect(lambda e=editor: self.on_cursor_moved(e))
         editor.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         editor.customContextMenuRequested.connect(self.show_context_menu)
         
@@ -322,6 +327,10 @@ class TextEditor(QMainWindow):
     def get_current_editor(self):
         return self.tab_widget.currentWidget()
 
+    def get_current_file(self):
+        editor = self.tab_widget.currentWidget()
+        return self.tabs[editor]["file"]
+
     def update_tab_title(self, editor):
         index = self.tab_widget.indexOf(editor)
         data = self.tabs[editor]
@@ -335,6 +344,46 @@ class TextEditor(QMainWindow):
     # =========================
     # EVENTS
     # =========================
+    def eventFilter(self, obj, event):
+        # Turns out my mouse wheel button is dead and its not pyt6... damn it
+        if event.type() == QEvent.Type.MouseButtonPress:
+            if event.button() == Qt.MouseButton.MiddleButton:
+                self.reset_zoom()
+        
+        if event.type() == QEvent.Type.Wheel:
+            # Check if Control is held
+            if event.modifiers() == Qt.KeyboardModifier.ControlModifier:
+                delta = event.angleDelta().y()
+                
+                if delta > 0:
+                    self.zoom_in() # Replace with your zoom/logic
+                elif delta < 0:
+                    self.zoom_out() # Replace with your zoom/logic
+                
+                # Returning True blocks the "Page Scroll" from happening
+                return True
+                
+        return super().eventFilter(obj, event)
+    
+    def on_tab_changed(self, index):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        self.clear_search()
+        
+        text = self.find_bar.input.text()
+        if text:
+            self.search(text)
+            
+        self.on_cursor_moved(editor) # moved across files
+    
+    def on_cursor_moved(self, editor):
+        cursor = editor.textCursor()
+        line = cursor.blockNumber() + 1
+        col = cursor.columnNumber()
+        self.cursor_status.setText(f"Ln {line}, Col {col}")
+    
     def on_text_changed(self, editor):
         data = self.tabs[editor]
         data["saved"] = False
@@ -398,9 +447,13 @@ class TextEditor(QMainWindow):
         self.edit_menu.addAction(self.create_action("Goto Line...", self.goto, "Ctrl+G"))
 
         self.view_menu = menubar.addMenu("View")
-        self.view_menu.addAction(self.create_action("Zoom In", self.zoom_in, "Ctrl++"))
+        self.view_menu.addAction(self.create_action("Zoom In", self.zoom_in, "Ctrl+="))
         self.view_menu.addAction(self.create_action("Zoom Out", self.zoom_out, "Ctrl+-"))
         self.view_menu.addAction(self.create_action("Reset Zoom", self.reset_zoom, "Ctrl+0"))
+
+        self.insert_menu = menubar.addMenu("Insert")
+        self.insert_menu.addAction(self.create_action("Timestamp", self.insert_timestamp))
+        self.insert_menu.addAction(self.create_action("Seperator", self.insert_separator))
 
         self.tools_menu = menubar.addMenu("Tools")
         self.tools_menu.addAction(self.create_action("Word Count", self.word_count, "Ctrl+W"))
@@ -416,6 +469,54 @@ class TextEditor(QMainWindow):
     # =========================
     # INSERTION
     # =========================
+
+    def insert_timestamp(self):
+        editor = self.get_current_editor()
+        file_path = self.tabs[editor].get('file')
+        suffix = file_path.suffix.lower() if file_path else ''
+        
+        now = datetime.now().astimezone()
+        
+        # Display formats
+        human_readable = now.strftime("%Y-%m-%d %H:%M:%S")
+        iso_date = now.strftime("%Y-%m-%d")
+
+        if suffix == '.html':
+            text = f'<time datetime="{now.isoformat()}">{human_readable}</time>'
+        elif suffix in ('.md', '.markdown'):
+            text = iso_date
+        else:
+            text = human_readable
+
+        editor.insertPlainText(text)
+        
+    def insert_separator(self):
+        editor = self.get_current_editor()
+        cursor = editor.textCursor()
+        
+        file_path = self.tabs[editor].get('file')
+        suffix = file_path.suffix.lower() if file_path else ''
+        
+        if suffix == '.md':
+            text = '\n--- \n'
+            editor.insertPlainText(text)
+        elif suffix == '.html':
+            text = '\n<hr>\n'
+            editor.insertPlainText(text)
+        else:
+            line_text = cursor.block().text()
+            width = 80
+            char = '─'
+
+            if line_text:
+                clean_text = line_text.rstrip(f"{char} ")
+                formatted = clean_text.ljust(width).replace(' ', char)
+                formatted = re.sub(r'(?<=[a-zA-Z0-9])─|─(?=[a-zA-Z0-9])', ' ', formatted)
+                cursor.movePosition(cursor.MoveOperation.StartOfBlock)
+                cursor.movePosition(cursor.MoveOperation.EndOfBlock, cursor.MoveMode.KeepAnchor)
+                cursor.insertText(formatted+'\n') 
+            else:
+                cursor.insertText(char * width)
 
     # =========================
     # FIND / REPLACE
@@ -768,17 +869,19 @@ class TextEditor(QMainWindow):
 
         for editor in self.tabs:
             editor.setFont(self.font)
+            
+        self.zoom_status.setText(f'{self.current_zoom}%')
 
     def zoom_in(self):
-        self.current_zoom += 10
+        self.current_zoom = max(self.MIN_ZOOM, self.current_zoom + self.ZOOM_STEP_SIZE)
         self.update_zoom()
 
     def zoom_out(self):
-        self.current_zoom -= 10
+        self.current_zoom = min(self.MAX_ZOOM, self.current_zoom - self.ZOOM_STEP_SIZE)
         self.update_zoom()
 
     def reset_zoom(self):
-        self.current_zoom = 100
+        self.current_zoom = self.DEFAULT_ZOOM
         self.update_zoom()
 
     # =========================
