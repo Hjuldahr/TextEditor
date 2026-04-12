@@ -1,12 +1,3 @@
-"""
-TODO
-edit_menu.add_command(label="Find [Here]", accelerator="Ctrl+F", command=self.find_cmd)
-        edit_menu.add_command(label="Replace [Here]", accelerator="Ctrl+R", command=self.replace_cmd)
-        edit_menu.add_command(label="Find [3 Files]", accelerator="Ctrl+Shift+F", command=self.all_file_find_cmd)
-        edit_menu.add_command(label="Replace [3 Files]", accelerator="Ctrl+Shift+R", command=self.all_file_replace_cmd)
-        edit_menu.add_command(label="Goto Line...", accelerator="Ctrl+G", command=self.goto_cmd)
-"""
-
 from collections import deque
 import sys
 import json
@@ -15,9 +6,106 @@ import webbrowser
 from pathlib import Path
 from urllib.parse import quote
 
-from PyQt6.QtWidgets import QApplication, QMainWindow, QTextEdit, QTabWidget, QFileDialog, QMessageBox, QMenu, QInputDialog
-from PyQt6.QtGui import QAction, QFont, QKeySequence
+from PyQt6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton, QTextEdit, QTabWidget, QFileDialog, QMessageBox, QMenu
+from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence, QTextCharFormat, QTextCursor, QTextDocument
 from PyQt6.QtCore import QTimer, Qt
+
+class FindBar(QFrame):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.timer = QTimer()
+        self.timer.setSingleShot(True)
+        self.timer.timeout.connect(self.trigger_search)
+        
+        self.setFixedWidth(400)
+        self.setFixedHeight(45)
+
+        self.setStyleSheet("""
+            QFrame { 
+                background-color: #ffffff; 
+                border: 1px solid #c0c0c0;
+            }
+        """)
+
+        layout = QHBoxLayout(self)
+        self.input = QLineEdit()
+        self.input.setPlaceholderText("Find text...")
+        #self.input.returnPressed.connect(self.do_find_next) # Press Enter to search
+        self.input.textEdited.connect(lambda: self.timer.start(150))
+
+        self.count = QLabel(self)
+
+        self.btn_prev = QPushButton("🡡")
+        self.btn_prev.setFixedWidth(30)
+        self.btn_prev.clicked.connect(self.do_find_prev)
+        
+        self.btn_next = QPushButton("🡣")
+        self.btn_next.setFixedWidth(30)
+        self.btn_next.clicked.connect(self.do_find_next)
+        
+        self.btn_select_only = QPushButton("⬚")
+        self.btn_select_only.setFixedWidth(30)
+        self.btn_select_only.setCheckable(True)
+        
+        self.btn_close = QPushButton("X")
+        self.btn_close.setFixedWidth(30)
+        self.btn_close.clicked.connect(self.close)
+
+        layout.addWidget(self.input)
+        layout.addWidget(self.count)
+        layout.addWidget(self.btn_prev)
+        layout.addWidget(self.btn_next)
+        layout.addWidget(self.btn_select_only)
+        layout.addWidget(self.btn_close)
+        self.hide()
+        
+        self._drag_pos = None
+        
+    def close(self):
+        self.parent().clear_search()
+        self.hide()
+
+    def do_find_next(self):
+        text = self.input.text()
+        #self.parent().smart_search(text)
+        self.parent().search_next()
+        
+    def do_find_prev(self):
+        text = self.input.text()
+        #self.parent().smart_search(text)
+        self.parent().search_prev()
+
+    def show_bar(self):
+        # Position at top right of the editor
+        self.move(self.parent().width() - self.width() - 20, 10)
+        self.show()
+        self.input.setFocus()
+        self.trigger_search()
+        
+    def mousePressEvent(self, event):
+        # Capture the initial click position within the widget
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        # Move the widget based on the mouse delta
+        if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos is not None:
+            # We move it relative to the parent (the main window)
+            new_pos = event.globalPosition().toPoint() - self._drag_pos
+            
+            # Optional: Constrain it so it doesn't leave the main window
+            parent_rect = self.parent().rect()
+            if parent_rect.contains(new_pos):
+                self.move(new_pos)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        self._drag_pos = None
+        
+    def trigger_search(self):
+        text = self.input.text()
+        self.parent().search(text)
 
 class TextEditor(QMainWindow):
     APP_TITLE = "TextEditor"
@@ -40,7 +128,13 @@ class TextEditor(QMainWindow):
         self.closed_this_session = [] # order is not important, as its already session scoped
         self.recent_files = [] # chronologically ordered, multi-session context
         self.current_zoom = 100
+        self.editor_enabled = True
         self.autosave_enabled = False
+        self.search_state = {
+            "text": "",
+            "results": [],
+            "index": -1
+        }
 
         self.font = QFont("Consolas", 12)
 
@@ -58,10 +152,29 @@ class TextEditor(QMainWindow):
         self.create_menus()
         self.load_app_data()
         self.rebuild_recent_files()
+        
+        # Child Widgets
+        self.find_bar = FindBar(self)
+        self.clear_search_position_label()
+        self.tab_widget.currentChanged.connect(self.on_tab_changed)
 
     # =========================
     # TAB SYSTEM
     # =========================
+    def get_doc_id(self, editor):
+        return id(editor.document())
+    
+    def on_tab_changed(self, index):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        self.clear_search()
+        
+        text = self.find_bar.input.text()
+        if text:
+            self.search(text)
+    
     def maybe_save_editor(self, editor):
         data = self.tabs[editor]
 
@@ -209,10 +322,6 @@ class TextEditor(QMainWindow):
     def get_current_editor(self):
         return self.tab_widget.currentWidget()
 
-    def get_current_data(self):
-        editor = self.get_current_editor()
-        return self.tabs.get(editor)
-
     def update_tab_title(self, editor):
         index = self.tab_widget.indexOf(editor)
         data = self.tabs[editor]
@@ -281,6 +390,13 @@ class TextEditor(QMainWindow):
         self.edit_menu.addAction(self.create_action("Copy", lambda: self.get_current_editor().copy(), "Ctrl+C"))
         self.edit_menu.addAction(self.create_action("Paste", lambda: self.get_current_editor().paste(), "Ctrl+V"))
 
+        self.file_menu.addSeparator()
+        self.edit_menu.addAction(self.create_action("Find", self.find, "Ctrl+F"))
+        self.edit_menu.addAction(self.create_action("Replace", self.replace, "Ctrl+R"))
+        self.edit_menu.addAction(self.create_action("Find Across Files", self.all_file_find, "Ctrl+Shift+F"))
+        self.edit_menu.addAction(self.create_action("Replace Across Files", self.all_file_replace, "Ctrl+Shift+R"))
+        self.edit_menu.addAction(self.create_action("Goto Line...", self.goto, "Ctrl+G"))
+
         self.view_menu = menubar.addMenu("View")
         self.view_menu.addAction(self.create_action("Zoom In", self.zoom_in, "Ctrl++"))
         self.view_menu.addAction(self.create_action("Zoom Out", self.zoom_out, "Ctrl+-"))
@@ -296,6 +412,157 @@ class TextEditor(QMainWindow):
         if shortcut:
             action.setShortcut(QKeySequence(shortcut))
         return action
+
+    # =========================
+    # INSERTION
+    # =========================
+
+    # =========================
+    # FIND / REPLACE
+    # =========================
+
+        ##self.edit_menu.addAction(self.create_action("Replace", self.replace, "Ctrl+R"))
+        #self.edit_menu.addAction(self.create_action("Find Across Files", self.all_file_find, "Ctrl+Shift+F"))
+        #self.edit_menu.addAction(self.create_action("Replace Across Files", self.all_file_replace, "Ctrl+Shift+R"))
+        #self.edit_menu.addAction(self.create_action("Goto Line...", self.goto, "Ctrl+G"))
+
+    def find(self):
+        self.find_bar.show_bar()
+        
+    def clear_search(self):
+        self.search_state = {
+            "text": "",
+            "results": [],
+            "index": -1
+        }
+
+        editor = self.get_current_editor()
+        if editor:
+            editor.setExtraSelections([])    
+        self.clear_search_position_label()
+        
+    def search(self, text):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        self.search_state["text"] = text
+
+        if not text:
+            self.clear_search()
+            return
+
+        doc = editor.document()
+        results = []
+
+        cursor = QTextCursor(doc)
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+
+        while True:
+            cursor = doc.find(text, cursor)
+            if cursor.isNull():
+                break
+            results.append((cursor.selectionStart(), cursor.selectionEnd()))
+
+        self.search_state["results"] = results
+        self.search_state["index"] = 0 if results else -1
+
+        self.apply_highlights()
+        self.update_search_position_label(1, len(results))
+        
+    def search_next(self):
+        r = self.search_state["results"]
+        if not r:
+            return
+        self.search_state["index"] = (self.search_state["index"] + 1) % len(r)
+        self.jump()
+
+    def search_prev(self):
+        r = self.search_state["results"]
+        if not r:
+            return
+        self.search_state["index"] = (self.search_state["index"] - 1) % len(r)
+        self.jump()    
+    
+    def jump(self):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        r = self.search_state["results"]
+        i = self.search_state["index"]
+
+        if i < 0 or i >= len(r):
+            return
+
+        start, end = r[i]
+
+        doc = editor.document()
+        doc_len = doc.characterCount() - 1
+
+        if start < 0 or end > doc_len:
+            return
+
+        cursor = QTextCursor(doc)
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+
+        editor.setTextCursor(cursor)
+        editor.ensureCursorVisible()
+
+        self.apply_highlights()
+        self.update_search_position_label(i, len(r))
+    
+    def clear_search_position_label(self):
+        self.find_bar.count.setText('No results')
+        
+    def update_search_position_label(self, i, n):
+        self.find_bar.count.setText(f'{i+1} of {n}')
+    
+    def apply_highlights(self):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        results = self.search_state["results"]
+        if not results:
+            editor.setExtraSelections([])
+            return
+
+        normal = QTextCharFormat()
+        normal.setBackground(QColor("yellow"))
+
+        current = QTextCharFormat()
+        current.setBackground(QColor("orange"))
+
+        extra = []
+        idx = self.search_state["index"]
+
+        doc = editor.document()
+
+        for i, (start, end) in enumerate(results):
+            cursor = QTextCursor(doc)
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+
+            sel = QTextEdit.ExtraSelection()
+            sel.cursor = cursor
+            sel.format = current if i == idx else normal
+            extra.append(sel)
+
+        editor.setExtraSelections(extra)
+                
+    def replace(self):
+        pass
+    
+    def all_file_find(self):
+        pass
+    
+    def all_file_replace(self):
+        pass
+    
+    def goto(self):
+        pass
 
     # =========================
     # RECENT FILE MENU
@@ -551,6 +818,7 @@ class TextEditor(QMainWindow):
             app_data_path = self.app_location / 'data' / 'data.json'
             app_data = json.loads(app_data_path.read_text(encoding="utf-8")) if app_data_path.exists() else {}
             
+            self.editor_enabled = app_data.get("editor enabled", True)
             self.autosave_enabled = app_data.get("autosave enabled", False)
             
             open_files = [Path(f) for f in app_data.get("open files", [])]
@@ -582,6 +850,7 @@ class TextEditor(QMainWindow):
             app_data_path.parent.mkdir(parents=True, exist_ok=True)
             
             app_data = {
+                "editor_enabled": self.editor_enabled,
                 "autosave enabled": self.autosave_enabled,
                 "open files": [str(tab['file']) for tab in self.tabs.values()],
                 "recent files": [str(file) for file in self.recent_files],
