@@ -191,7 +191,7 @@ class TextEditor(QMainWindow):
         self.closed_this_session = [] # order is not important, as its already session scoped
         self.recent_files = [] # chronologically ordered, multi-session context
         self.current_zoom = self.DEFAULT_ZOOM
-        self.editor_enabled = True
+        self.readonly_enabled = False
         self.autosave_enabled = False
         self.search_state = SearchState()
         
@@ -503,17 +503,23 @@ class TextEditor(QMainWindow):
         self.file_menu.addAction(self.create_action("Exit", self.close, "Alt+F4"))
 
         self.edit_menu = menubar.addMenu("Edit")
+        
         self.edit_menu.addAction(self.create_action("Cut", lambda: self.get_current_editor().cut(), "Ctrl+X"))
         self.edit_menu.addAction(self.create_action("Copy", lambda: self.get_current_editor().copy(), "Ctrl+C"))
         self.edit_menu.addAction(self.create_action("Paste", lambda: self.get_current_editor().paste(), "Ctrl+V"))
 
-        self.file_menu.addSeparator()
-        self.edit_menu.addAction(self.create_action("Find", self.find, "Ctrl+F"))
-        self.edit_menu.addAction(self.create_action("Replace", self.replace, "Ctrl+R"))
-        self.edit_menu.addAction(self.create_action("Find Across Files", self.all_file_find, "Ctrl+Shift+F"))
-        self.edit_menu.addAction(self.create_action("Replace Across Files", self.all_file_replace, "Ctrl+Shift+R"))
-        self.edit_menu.addAction(self.create_action("Goto Line...", self.goto, "Ctrl+G"))
+        self.edit_menu.addSeparator()
+        self.edit_menu.addAction(self.create_action("Find & Replace", self.find, "Ctrl+F"))
+        #self.edit_menu.addAction(self.create_action("Find Across Files", self.all_file_find, "Ctrl+Shift+F"))
+        self.edit_menu.addAction(self.create_action("Goto Line", self.goto, "Ctrl+G"))
 
+        self.edit_menu.addSeparator()
+        readonly_action = QAction("Readonly", self)
+        readonly_action.setCheckable(True)
+        readonly_action.setShortcut(QKeySequence("Ctrl+L"))
+        readonly_action.triggered.connect(self.toggle_readonly)
+        self.edit_menu.addAction(readonly_action)
+    
         self.view_menu = menubar.addMenu("View")
         self.view_menu.addAction(self.create_action("Zoom In", self.zoom_in, "Ctrl+="))
         self.view_menu.addAction(self.create_action("Zoom Out", self.zoom_out, "Ctrl+-"))
@@ -1015,18 +1021,23 @@ class TextEditor(QMainWindow):
     
     def toggle_autosave(self, state):
         self.autosave_enabled = state
+        
+    def toggle_readonly(self, state):
+        self.readonly_enabled = state
     
     def load_app_data(self):
         try:
             app_data_path = self.app_location / 'data' / 'data.json'
             app_data = json.loads(app_data_path.read_text(encoding="utf-8")) if app_data_path.exists() else {}
             
-            self.editor_enabled = app_data.get("editor enabled", True)
-            self.autosave_enabled = app_data.get("autosave enabled", False)
+            preferences = app_data.get("preferences", {})
+            self.readonly_enabled = preferences.get("readonly enabled", False)
+            self.autosave_enabled = preferences.get("autosave enabled", False)
             
-            open_files = [Path(f) for f in app_data.get("open files", [])]
-            recent_files = [Path(f) for f in app_data.get("recent files", [])]
-            closed_this_session = [Path(f) for f in app_data.get("prev open files", [])]
+            session = app_data.get("session", {})
+            open_files = [Path(f) for f in session.get("open files", [])]
+            recent_files = [Path(f) for f in session.get("recent files", [])]
+            closed_this_session = [Path(f) for f in session.get("prev open files", [])]
 
             all_existing = {p for p in {*open_files, *recent_files, *closed_this_session} if p.exists()}
             
@@ -1053,11 +1064,15 @@ class TextEditor(QMainWindow):
             app_data_path.parent.mkdir(parents=True, exist_ok=True)
             
             app_data = {
-                "editor_enabled": self.editor_enabled,
-                "autosave enabled": self.autosave_enabled,
-                "open files": [str(tab.file) for tab in self.tabs.values()],
-                "recent files": [str(file) for file in self.recent_files],
-                "prev open files": [str(file) for file in self.closed_this_session]
+                "preferences": {
+                    "readonly enabled": self.readonly_enabled,
+                    "autosave enabled": self.autosave_enabled
+                },
+                "session": {
+                    "open files": [str(tab.file) for tab in self.tabs.values()],
+                    "recent files": [str(file) for file in self.recent_files],
+                    "prev open files": [str(file) for file in self.closed_this_session]
+                }
             }
             
             app_data_path.write_text(json.dumps(app_data, indent=2), encoding="utf-8")
