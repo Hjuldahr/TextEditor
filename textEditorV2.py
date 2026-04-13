@@ -1,7 +1,7 @@
 #TODO time opened tracking for recent files
 
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import datetime
 import sys
 import json
 import re
@@ -14,7 +14,7 @@ from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence, QTextCharFormat, Q
 from PyQt6.QtCore import QEvent, QTimer, Qt
 import timeago
 
-class RecentFileData():
+class FileAccessData():
     def __init__(self, file: Path, access_timestamp: float = None):
         self.file = file
         self.access_timestamp = access_timestamp or datetime.now().astimezone().timestamp()
@@ -254,7 +254,7 @@ class TextEditor(QMainWindow):
         self.resize(800, 600)
 
         self.tabs = TabsData()  # widget -> {file, saved}, order should be preserved when moving tabs
-        self.closed_this_session = [] # order is not important, as its already session scoped
+        self.closed_this_session = {} # order is not important, as its already session scoped
         self.recent_files = {} # chronologically ordered, multi-session context
         self.current_zoom = self.DEFAULT_ZOOM
         self.readonly_enabled = False
@@ -337,9 +337,8 @@ class TextEditor(QMainWindow):
         index = self.tab_widget.indexOf(editor)
         self.tab_widget.removeTab(index)
         
-        if self.tabs[editor].file in self.closed_this_session:
-            self.closed_this_session.remove(self.tabs[editor].file)
-        self.closed_this_session.append(self.tabs[editor].file)
+        file = self.tabs[editor].file
+        self.closed_this_session[file] = FileAccessData(file)
         
         del self.tabs[editor]
 
@@ -371,9 +370,7 @@ class TextEditor(QMainWindow):
             index = self.tab_widget.indexOf(tab_data.editor)
             self.tab_widget.removeTab(index)
             
-            if tab_data.file in self.closed_this_session:
-                self.closed_this_session.remove(tab_data.file)
-            self.closed_this_session.append(tab_data.file)
+            self.closed_this_session[tab_data.file] = FileAccessData(tab_data.file)
             
             del self.tabs[tab_data.editor]
 
@@ -407,9 +404,7 @@ class TextEditor(QMainWindow):
 
         # Only track real files
         if file:
-            if file in self.closed_this_session:
-                self.closed_this_session.remove(file)
-            self.closed_this_session.append(file)
+            self.closed_this_session[file] = FileAccessData(file)
             
             if file in self.open_files:
                 self.open_files.remove(file)
@@ -445,8 +440,7 @@ class TextEditor(QMainWindow):
         
         # File is now open → remove from closed_this_session if present
         if file:
-            if file in self.closed_this_session:
-                self.closed_this_session.remove(file)
+            self.closed_this_session.pop(file, None)
                 
             if file not in self.open_files:    
                 self.open_files.append(file)
@@ -914,19 +908,25 @@ class TextEditor(QMainWindow):
         self.recent_file_menu.addSeparator()
         
         # closed files menu
-        for file in self.closed_this_session:
+        # if any(file == file_data for file_data in self.closed_this_session.values()):
+        
+        now = datetime.now().astimezone()
+        
+        data = sorted(self.closed_this_session.values(), key=lambda e: e.access_timestamp, reverse=True)
+        for file_data in data:
+            if any(file_data.file == cts.file for cts in self.closed_this_session.values()):
+                continue
+            time_str = timeago.format(datetime.fromtimestamp(file_data.access_timestamp, tz=now.tzinfo), now)
             self.recent_file_menu.addAction(
-                self.create_action(file.name, lambda _, f=file: self.headless_open_file(f))
+                self.create_action(f'{file_data.file.name} - {time_str}', lambda _, f=file_data.file: self.headless_open_file(f))
             )
 
         self.recent_file_menu.addSeparator()
         
         # recent files menu
-        now = datetime.now().astimezone()
-        
         data = sorted(self.recent_files.values(), key=lambda e: e.access_timestamp, reverse=True)
         for file_data in data:
-            if file_data.file in self.closed_this_session:
+            if any(file_data.file == cts.file for cts in self.closed_this_session.values()):
                 continue
             time_str = timeago.format(datetime.fromtimestamp(file_data.access_timestamp, tz=now.tzinfo), now)
             self.recent_file_menu.addAction(
@@ -941,15 +941,15 @@ class TextEditor(QMainWindow):
 
     def reopen_closed_this_session(self):
         # sort for predictable order if needed
-        files_to_reopen = list(self.closed_this_session)
-        for file in files_to_reopen:
+        data = self.closed_this_session.values()
+        for file_data in data:
+            file = file_data.file
             try:
                 content = file.read_text(encoding="utf-8")
                 self.create_new_tab(content, file)
             except Exception:
                 pass
-            if file in self.closed_this_session:
-                self.closed_this_session.remove(file)
+            self.closed_this_session.pop(file, None)
             self.push_recent_file(file)
         self.truncate_recent_files()
         self.rebuild_recent_files()
@@ -966,7 +966,7 @@ class TextEditor(QMainWindow):
     # =========================
     def push_recent_file(self, file):
         if file in self.recent_files.keys():
-            self.recent_files[file] = RecentFileData(file)
+            self.recent_files[file] = FileAccessData(file)
         
     def truncate_recent_files(self):
         #self.recent_files = self.recent_files[:self.MAX_RECENT_FILES]
@@ -1215,22 +1215,24 @@ class TextEditor(QMainWindow):
             for entry in session.get("recent files", []):
                 file = Path(entry.get('file'))
                 if file.exists():
-                    access_time = entry.get('accessed', datetime.now().astimezone().timestamp())
+                    access_time = entry.get('atime', datetime.now().astimezone().timestamp())
 
-                    self.recent_files[file] = RecentFileData(file, access_time)
-                
-            self.closed_this_session = [Path(f) for f in session.get("prev open files", [])]
+                    self.recent_files[file] = FileAccessData(file, access_time)
+                    
+            for entry in session.get("closed files", []):
+                file = Path(entry.get('file'))
+                if file.exists():
+                    access_time = entry.get('atime', datetime.now().astimezone().timestamp())
 
-            #all_existing = {p for p in {*open_files, *recent_files, *closed_this_session} if p.exists()}
-            
-            #open_files = [p for p in open_files if p in all_existing]
-            #self.recent_files = [p for p in recent_files if p in all_existing]
-            #self.closed_this_session = [p for p in closed_this_session if p in all_existing]
+                    self.closed_this_session[file] = FileAccessData(file, access_time)        
             
         except Exception as e:
             print(f"Error loading data: {e}")
-            open_files, self.recent_files, self.closed_this_session = [], [], []
+            self.open_files = []
+            self.recent_files = {}
+            self.closed_this_session = {}
         
+        # Rehydrate tabs
         if not self.open_files:
             self.create_new_tab()
         else:
@@ -1252,11 +1254,16 @@ class TextEditor(QMainWindow):
                 },
                 "session": {
                     "open files": [str(tab.file) for tab in self.tabs.values()],
+                    
                     "recent files": [{
                         "file": str(data.file),
-                        "accessed": data.access_timestamp
+                        "atime": data.access_timestamp
                     } for data in self.recent_files.values()],
-                    "prev open files": [str(file) for file in self.closed_this_session]
+                    
+                    "closed files": [{
+                        "file": str(data.file),
+                        "atime": data.access_timestamp
+                    } for data in self.closed_this_session.values()]
                 }
             }
             
