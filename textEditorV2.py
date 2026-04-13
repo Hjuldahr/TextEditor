@@ -56,16 +56,19 @@ class SearchState:
     DEFAULT_TEXT = ""
     DEFAULT_RESULTS = []
     DEFAULT_INDEX = -1
+    DEFAULT_SUPPRESS = False
     
     def __init__(self):
         self.text = self.DEFAULT_TEXT
         self.results = self.DEFAULT_RESULTS
         self.index = self.DEFAULT_INDEX
+        self.suppress_search_refresh = self.DEFAULT_SUPPRESS
         
     def clear(self):
         self.text = self.DEFAULT_TEXT
         self.results = self.DEFAULT_RESULTS
         self.index = self.DEFAULT_INDEX
+        self.suppress_search_refresh = self.DEFAULT_SUPPRESS
 
 class FindBar(QFrame):
     def __init__(self, parent=None):
@@ -103,6 +106,8 @@ class FindBar(QFrame):
         self.btn_select_only = QPushButton("⬚")
         self.btn_select_only.setFixedWidth(30)
         self.btn_select_only.setCheckable(True)
+        # Refresh search if constraint changes
+        self.btn_select_only.clicked.connect(self.trigger_search)
         
         self.btn_close = QPushButton("X")
         self.btn_close.setFixedWidth(30)
@@ -449,6 +454,14 @@ class TextEditor(QMainWindow):
             status_text += f", Selected {sel}"
         
         self.cursor_status.setText(status_text)
+        
+        if (
+            not self.search_state.suppress_search_refresh and
+            self.find_bar.isVisible() and
+            self.find_bar.btn_select_only.isChecked() and
+            self.find_bar.input.text()
+        ):
+            self.find_bar.timer.start(100)
     
     def on_text_changed(self, editor):
         data = self.tabs[editor]
@@ -605,6 +618,9 @@ class TextEditor(QMainWindow):
     def goto(self):
         editor = self.get_current_editor()
         cursor = editor.textCursor() 
+        
+        # Store the current column (relative to start of line)
+        current_column = cursor.positionInBlock()
         total_lines = editor.document().blockCount()
         
         line_number, ok = QInputDialog.getInt(
@@ -615,13 +631,18 @@ class TextEditor(QMainWindow):
         if ok:
             block = editor.document().findBlockByNumber(line_number - 1) 
             if block.isValid():
-                cursor.setPosition(block.position()) 
+                # Calculate the new target position
+                # Use min() to prevent jumping past the end of a shorter line
+                new_col = min(current_column, block.length() - 1)
+                new_pos = block.position() + new_col
+                
+                cursor.setPosition(new_pos) 
                 editor.setTextCursor(cursor) 
                 editor.ensureCursorVisible()
 
     def find_by_selection(self):
         editor = self.get_current_editor()
-        selected = editor.textCursor().selectedText()
+        selected = editor.textCursor().selectedText().replace('\u2029', '\n')
 
         if not selected.strip():
             return
@@ -655,20 +676,50 @@ class TextEditor(QMainWindow):
         doc = editor.document()
         results = []
 
-        cursor = QTextCursor(doc)
-        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        cursor = editor.textCursor()
 
-        while True:
-            cursor = doc.find(text, cursor)
-            if cursor.isNull():
-                break
-            results.append((cursor.selectionStart(), cursor.selectionEnd()))
+        # Selection mode toggle
+        if self.find_bar.btn_select_only.isChecked() and cursor.hasSelection():
+            start = cursor.selectionStart()
+            end = cursor.selectionEnd()
+
+            cursor = QTextCursor(doc)
+            cursor.setPosition(start)
+
+            while True:
+                cursor = doc.find(text, cursor)
+                if cursor.isNull():
+                    break
+
+                s = cursor.selectionStart()
+                e = cursor.selectionEnd()
+
+                if s >= end:
+                    break
+
+                # only include matches fully inside selection
+                if e <= end:
+                    results.append((s, e))
+        else:
+            # normal full-document search
+            cursor = QTextCursor(doc)
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+
+            while True:
+                cursor = doc.find(text, cursor)
+                if cursor.isNull():
+                    break
+                results.append((cursor.selectionStart(), cursor.selectionEnd()))
 
         self.search_state.results = results
         self.search_state.index = 0 if results else -1
 
         self.apply_highlights()
-        self.update_search_position_label(1, len(results))
+
+        if results:
+            self.update_search_position_label(0, len(results))
+        else:
+            self.clear_search_position_label()
         
     def search_next(self):
         r = self.search_state.results
@@ -707,7 +758,10 @@ class TextEditor(QMainWindow):
         cursor.setPosition(start)
         cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
 
+        self.search_state.suppress_search_refresh = True
         editor.setTextCursor(cursor)
+        self.search_state.suppress_search_refresh = False
+    
         editor.ensureCursorVisible()
 
         self.apply_highlights()
