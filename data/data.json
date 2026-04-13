@@ -7,23 +7,35 @@
     "open files": [
       "C:\\Users\\robert\\Documents\\test.txt",
       "C:\\Users\\robert\\Documents\\VS Code Files\\TextEditor\\TODO.md",
-      "C:\\Users\\robert\\Documents\\test4.txt",
-      "C:\\Users\\robert\\Documents\\test.csv",
-      "C:\\Users\\robert\\Documents\\test2.txt",
-      "C:\\Users\\robert\\Documents\\test3.txt"
+      "C:\\Users\\robert\\Documents\\test4.txt"
     ],
     "recent files": [
-      "C:\\Users\\robert\\Documents\\test3.txt",
-      "C:\\Users\\robert\\Documents\\test2.txt",
-      "C:\\Users\\robert\\Documents\\test.csv",
-      "C:\\Users\\robert\\Documents\\test4.txt",
-      "C:\\Users\\robert\\Documents\\VS Code Files\\TextEditor\\TODO.md",
-      "C:\\Users\\robert\\Documents\\test.txt"
+      {
+        "file": "C:\\Users\\robert\\Documents\\test2.txt",
+        "accessed": 1776107038.470923
+      },
+      {
+        "file": "C:\\Users\\robert\\Documents\\test.csv",
+        "accessed": 1776107048.786505
+      },
+      {
+        "file": "C:\\Users\\robert\\Documents\\test4.txt",
+        "accessed": 1776107927.096175
+      },
+      {
+        "file": "C:\\Users\\robert\\Documents\\VS Code Files\\TextEditor\\TODO.md",
+        "accessed": 1776107927.09448
+      },
+      {
+        "file": "C:\\Users\\robert\\Documents\\test.txt",
+        "accessed": 1776107927.091135
+      }
     ],
     "prev open files": [
       "C:\\Users\\robert\\Documents\\VS Code Files\\InharNumbers\\InharNumbers.py",
       "C:\\Users\\robert\\Documents\\test.html",
-      "C:\\Users\\robert\\Documents\\test.json"
+      "C:\\Users\\robert\\Documents\\test.json",
+      "C:\\Users\\robert\\Documents\\test3.txt"
     ]
   }
 }
