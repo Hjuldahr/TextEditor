@@ -1,3 +1,4 @@
+from contextlib import contextmanager
 from datetime import datetime, timezone
 import sys
 import json
@@ -7,7 +8,7 @@ import webbrowser
 from pathlib import Path
 from urllib.parse import quote
 
-from PyQt6.QtWidgets import QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QPushButton, QTextEdit, QTabWidget, QFileDialog, QMessageBox, QMenu
+from PyQt6.QtWidgets import QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QPushButton, QTextEdit, QTabWidget, QFileDialog, QMessageBox, QMenu, QVBoxLayout
 from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence, QTextCharFormat, QTextCursor, QTextDocument
 from PyQt6.QtCore import QEvent, QTimer, Qt
 
@@ -23,6 +24,7 @@ class TabData:
         self.editor = editor
         self.file = file
         self.saved = saved
+        self.search_state = SearchState()
 
 class TabsData:
     def __init__(self):
@@ -78,7 +80,7 @@ class FindBar(QFrame):
         self.timer.timeout.connect(self.trigger_search)
         
         self.setFixedWidth(400)
-        self.setFixedHeight(45)
+        self.setFixedHeight(95) # Enough height for two rows + margins
 
         self.setStyleSheet("""
             QFrame { 
@@ -87,40 +89,75 @@ class FindBar(QFrame):
             }
         """)
 
-        layout = QHBoxLayout(self)
+        # Main Layout
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(5, 5, 5, 5)
+        main_layout.setSpacing(2)
+
+        # --- Row 1: Find ---
+        find_layout = QHBoxLayout()
+        
         self.input = QLineEdit()
         self.input.setPlaceholderText("Find text...")
-        #self.input.returnPressed.connect(self.do_find_next) # Press Enter to search
+        # Re-add: Live search on text change
         self.input.textEdited.connect(lambda: self.timer.start(150))
+        # Re-add: Enter key moves to next result
+        self.input.returnPressed.connect(self.do_find_next)
 
-        self.count = QLabel(self)
+        self.count = QLabel("0 of 0")
 
         self.btn_prev = QPushButton("🡡")
-        self.btn_prev.setFixedWidth(30)
-        self.btn_prev.clicked.connect(self.do_find_prev)
+        self.btn_prev.clicked.connect(self.do_find_prev) # Re-add
         
         self.btn_next = QPushButton("🡣")
-        self.btn_next.setFixedWidth(30)
-        self.btn_next.clicked.connect(self.do_find_next)
+        self.btn_next.clicked.connect(self.do_find_next) # Re-add
         
         self.btn_select_only = QPushButton("⬚")
-        self.btn_select_only.setFixedWidth(30)
         self.btn_select_only.setCheckable(True)
-        # Refresh search if constraint changes
-        self.btn_select_only.clicked.connect(self.trigger_search)
+        self.btn_select_only.clicked.connect(self.trigger_search) # Re-add
         
         self.btn_close = QPushButton("X")
-        self.btn_close.setFixedWidth(30)
-        self.btn_close.clicked.connect(self.close)
+        self.btn_close.clicked.connect(self.close) # Re-add
 
-        layout.addWidget(self.input)
-        layout.addWidget(self.count)
-        layout.addWidget(self.btn_prev)
-        layout.addWidget(self.btn_next)
-        layout.addWidget(self.btn_select_only)
-        layout.addWidget(self.btn_close)
-        self.hide()
+        # Styling & Focus
+        for btn in [self.btn_prev, self.btn_next, self.btn_select_only, self.btn_close]:
+            btn.setFixedWidth(30)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        find_layout.addWidget(self.input)
+        find_layout.addWidget(self.count)
+        find_layout.addWidget(self.btn_prev)
+        find_layout.addWidget(self.btn_next)
+        find_layout.addWidget(self.btn_select_only)
+        find_layout.addWidget(self.btn_close)
+
+        # --- Row 2: Replace ---
+        replace_layout = QHBoxLayout()
         
+        self.replace_input = QLineEdit()
+        self.replace_input.setPlaceholderText("Replace with...")
+        # Re-add: Enter key in replace box triggers single replacement
+        self.replace_input.returnPressed.connect(self.do_replace)
+
+        self.btn_replace = QPushButton("Replace")
+        self.btn_replace.clicked.connect(self.do_replace) # Re-add
+
+        self.btn_replace_all = QPushButton("All")
+        self.btn_replace_all.clicked.connect(self.do_replace_all) # Re-add
+
+        # Styling & Focus
+        for btn in [self.btn_replace, self.btn_replace_all]:
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+        replace_layout.addWidget(self.replace_input)
+        replace_layout.addWidget(self.btn_replace)
+        replace_layout.addWidget(self.btn_replace_all)
+
+        # Assemble
+        main_layout.addLayout(find_layout)
+        main_layout.addLayout(replace_layout)
+        
+        self.hide()
         self._drag_pos = None
         
     def close(self):
@@ -168,6 +205,23 @@ class FindBar(QFrame):
     def trigger_search(self):
         text = self.input.text()
         self.parent().search(text)
+        
+    def do_replace(self):
+        # Calls the parent TextEditor method
+        self.parent().replace_current(self.replace_input.text())
+
+    def do_replace_all(self):
+        # Calls the parent TextEditor method
+        self.parent().replace_all(self.replace_input.text())
+
+    def do_find_next(self):
+        self.parent().search_next()
+        
+    def do_find_prev(self):
+        self.parent().search_prev()
+
+    def trigger_search(self):
+        self.parent().search(self.input.text())
 
 class TextEditor(QMainWindow):
     APP_TITLE = "TextEditor"
@@ -198,7 +252,6 @@ class TextEditor(QMainWindow):
         self.current_zoom = self.DEFAULT_ZOOM
         self.readonly_enabled = False
         self.autosave_enabled = False
-        self.search_state = SearchState()
         
         self.status = self.statusBar()
         self.cursor_status = QLabel()
@@ -387,6 +440,12 @@ class TextEditor(QMainWindow):
         
         self.rebuild_recent_files()
 
+    def get_search_state(self):
+        editor = self.get_current_editor()
+        if not editor:
+            return None
+        return self.tabs[editor].search_state
+
     def get_current_editor(self):
         return self.tab_widget.currentWidget()
 
@@ -431,10 +490,6 @@ class TextEditor(QMainWindow):
         editor = self.get_current_editor()
         if not editor or editor not in self.tabs:
             return
-
-        file = self.tabs[editor].file
-
-        self.clear_search()
         
         text = self.find_bar.input.text()
         if text:
@@ -456,7 +511,7 @@ class TextEditor(QMainWindow):
         self.cursor_status.setText(status_text)
         
         if (
-            not self.search_state.suppress_search_refresh and
+            not self.get_search_state().suppress_search_refresh and
             self.find_bar.isVisible() and
             self.find_bar.btn_select_only.isChecked() and
             self.find_bar.input.text()
@@ -655,11 +710,13 @@ class TextEditor(QMainWindow):
         self.find_bar.show_bar()
         
     def clear_search(self):
-        self.search_state.clear()
+        self.find_bar.input.blockSignals(True)
+        self.find_bar.input.clear()
+        self.find_bar.input.blockSignals(False)
 
-        editor = self.get_current_editor()
-        if editor:
-            editor.setExtraSelections([])    
+        for tab in self.tabs.values():
+            tab.editor.setExtraSelections([])
+
         self.clear_search_position_label()
         
     def search(self, text):
@@ -667,7 +724,7 @@ class TextEditor(QMainWindow):
         if not editor:
             return
 
-        self.search_state.text = text
+        self.get_search_state().text = text
 
         if not text:
             self.clear_search()
@@ -711,8 +768,8 @@ class TextEditor(QMainWindow):
                     break
                 results.append((cursor.selectionStart(), cursor.selectionEnd()))
 
-        self.search_state.results = results
-        self.search_state.index = 0 if results else -1
+        self.get_search_state().results = results
+        self.get_search_state().index = 0 if results else -1
 
         self.apply_highlights()
 
@@ -722,26 +779,34 @@ class TextEditor(QMainWindow):
             self.clear_search_position_label()
         
     def search_next(self):
-        r = self.search_state.results
+        r = self.get_search_state().results
         if not r:
             return
-        self.search_state.index = (self.search_state.index + 1) % len(r)
+        self.get_search_state().index = (self.get_search_state().index + 1) % len(r)
         self.jump()
 
     def search_prev(self):
-        r = self.search_state.results
+        r = self.get_search_state().results
         if not r:
             return
-        self.search_state.index = (self.search_state.index - 1) % len(r)
+        self.get_search_state().index = (self.get_search_state().index - 1) % len(r)
         self.jump()    
+    
+    @contextmanager
+    def suppress_search(self):
+        self.get_search_state().suppress_search_refresh = True
+        try:
+            yield
+        finally:
+            self.get_search_state().suppress_search_refresh = False
     
     def jump(self):
         editor = self.get_current_editor()
         if not editor:
             return
 
-        r = self.search_state.results
-        i = self.search_state.index
+        r = self.get_search_state().results
+        i = self.get_search_state().index
 
         if i < 0 or i >= len(r):
             return
@@ -758,9 +823,8 @@ class TextEditor(QMainWindow):
         cursor.setPosition(start)
         cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
 
-        self.search_state.suppress_search_refresh = True
-        editor.setTextCursor(cursor)
-        self.search_state.suppress_search_refresh = False
+        with self.suppress_search():
+            editor.setTextCursor(cursor)
     
         editor.ensureCursorVisible()
 
@@ -778,7 +842,12 @@ class TextEditor(QMainWindow):
         if not editor:
             return
 
-        results = self.search_state.results
+        state = self.get_search_state()
+        if not state.text or not state.results:
+            editor.setExtraSelections([])
+            return
+
+        results = state.results
         if not results:
             editor.setExtraSelections([])
             return
@@ -790,7 +859,7 @@ class TextEditor(QMainWindow):
         current.setBackground(QColor("orange"))
 
         extra = []
-        idx = self.search_state.index
+        idx = self.get_search_state().index
 
         doc = editor.document()
 
