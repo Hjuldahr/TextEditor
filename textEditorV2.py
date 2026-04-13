@@ -7,7 +7,7 @@ import webbrowser
 from pathlib import Path
 from urllib.parse import quote
 
-from PyQt6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton, QTextEdit, QTabWidget, QFileDialog, QMessageBox, QMenu
+from PyQt6.QtWidgets import QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QPushButton, QTextEdit, QTabWidget, QFileDialog, QMessageBox, QMenu
 from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence, QTextCharFormat, QTextCursor, QTextDocument
 from PyQt6.QtCore import QEvent, QTimer, Qt
 
@@ -509,7 +509,8 @@ class TextEditor(QMainWindow):
         self.edit_menu.addAction(self.create_action("Paste", lambda: self.get_current_editor().paste(), "Ctrl+V"))
 
         self.edit_menu.addSeparator()
-        self.edit_menu.addAction(self.create_action("Find & Replace", self.find, "Ctrl+F"))
+        self.edit_menu.addAction(self.create_action("Find / Replace", self.find, "Ctrl+F"))
+        self.edit_menu.addAction(self.create_action("Find By Selection", self.find_by_selection))
         #self.edit_menu.addAction(self.create_action("Find Across Files", self.all_file_find, "Ctrl+Shift+F"))
         self.edit_menu.addAction(self.create_action("Goto Line", self.goto, "Ctrl+G"))
 
@@ -600,6 +601,34 @@ class TextEditor(QMainWindow):
         #self.edit_menu.addAction(self.create_action("Find Across Files", self.all_file_find, "Ctrl+Shift+F"))
         #self.edit_menu.addAction(self.create_action("Replace Across Files", self.all_file_replace, "Ctrl+Shift+R"))
         #self.edit_menu.addAction(self.create_action("Goto Line...", self.goto, "Ctrl+G"))
+
+    def goto(self):
+        editor = self.get_current_editor()
+        cursor = editor.textCursor() 
+        total_lines = editor.document().blockCount()
+        
+        line_number, ok = QInputDialog.getInt(
+            self, 'Goto Line', f'{total_lines} Total Lines', 
+            cursor.blockNumber() + 1, 1, total_lines, 1
+        )
+        
+        if ok:
+            block = editor.document().findBlockByNumber(line_number - 1) 
+            if block.isValid():
+                cursor.setPosition(block.position()) 
+                editor.setTextCursor(cursor) 
+                editor.ensureCursorVisible()
+
+    def find_by_selection(self):
+        editor = self.get_current_editor()
+        selected = editor.textCursor().selectedText()
+
+        if not selected.strip():
+            return
+        
+        self.find_bar.show_bar()
+        self.find_bar.input.setText(selected)
+        self.search(selected)
 
     def find(self):
         self.find_bar.show_bar()
@@ -730,9 +759,6 @@ class TextEditor(QMainWindow):
         pass
     
     def all_file_replace(self):
-        pass
-    
-    def goto(self):
         pass
 
     # =========================
@@ -896,6 +922,11 @@ class TextEditor(QMainWindow):
         clipboard = QApplication.clipboard()
         has_clipboard = bool(clipboard.text())
 
+        find_action = self.create_action("Find by Selection", self.find_by_selection, "Ctrl+F")
+        find_action.setEnabled(has_selection)
+        menu.addAction(find_action)
+
+        menu.addSeparator()
         cut_action = self.create_action("Cut", editor.cut, "Ctrl+X")
         cut_action.setEnabled(has_selection)
         menu.addAction(cut_action)
@@ -1031,8 +1062,8 @@ class TextEditor(QMainWindow):
             app_data = json.loads(app_data_path.read_text(encoding="utf-8")) if app_data_path.exists() else {}
             
             preferences = app_data.get("preferences", {})
-            self.readonly_enabled = preferences.get("readonly enabled", False)
-            self.autosave_enabled = preferences.get("autosave enabled", False)
+            self.readonly_enabled = preferences.get("readonly", False)
+            self.autosave_enabled = preferences.get("autosave", False)
             
             session = app_data.get("session", {})
             open_files = [Path(f) for f in session.get("open files", [])]
@@ -1065,8 +1096,8 @@ class TextEditor(QMainWindow):
             
             app_data = {
                 "preferences": {
-                    "readonly enabled": self.readonly_enabled,
-                    "autosave enabled": self.autosave_enabled
+                    "readonly": self.readonly_enabled,
+                    "autosave": self.autosave_enabled
                 },
                 "session": {
                     "open files": [str(tab.file) for tab in self.tabs.values()],

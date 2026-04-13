@@ -1,7 +1,7 @@
 {
   "preferences": {
-    "readonly enabled": true,
-    "autosave enabled": true
+    "readonly": true,
+    "autosave": true
   },
   "session": {
     "open files": [
