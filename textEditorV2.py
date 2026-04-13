@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 import sys
 import json
 import re
+from weakref import WeakKeyDictionary
 import webbrowser
 from pathlib import Path
 from urllib.parse import quote
@@ -9,6 +10,62 @@ from urllib.parse import quote
 from PyQt6.QtWidgets import QApplication, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QPushButton, QTextEdit, QTabWidget, QFileDialog, QMessageBox, QMenu
 from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence, QTextCharFormat, QTextCursor, QTextDocument
 from PyQt6.QtCore import QEvent, QTimer, Qt
+
+class TabData:
+    def __init__(self, editor: QTextEdit, file: Path, saved: bool=True):
+        """TabData
+
+        Args:
+            editor (QTextEdit): PyQt6 object
+            file (Path): PathLib object
+            saved (bool, optional): saved status. Defaults to True.
+        """
+        self.editor = editor
+        self.file = file
+        self.saved = saved
+
+class TabsData:
+    def __init__(self):
+        self.data = dict()
+
+    def __getitem__(self, key):
+        return self.data[id(key)]
+
+    def __setitem__(self, key, value):
+        self.data[id(key)] = value
+
+    def __delitem__(self, key):
+        del self.data[id(key)]
+
+    def __contains__(self, key):
+        return id(key) in self.data
+
+    def __iter__(self):
+        return iter(self.data.values())
+
+    def ids(self):
+        return self.data.keys()
+
+    def values(self):
+        return self.data.values()
+    
+    def items(self):
+        return self.data.items()
+
+class SearchState:
+    DEFAULT_TEXT = ""
+    DEFAULT_RESULTS = []
+    DEFAULT_INDEX = -1
+    
+    def __init__(self):
+        self.text = self.DEFAULT_TEXT
+        self.results = self.DEFAULT_RESULTS
+        self.index = self.DEFAULT_INDEX
+        
+    def clear(self):
+        self.text = self.DEFAULT_TEXT
+        self.results = self.DEFAULT_RESULTS
+        self.index = self.DEFAULT_INDEX
 
 class FindBar(QFrame):
     def __init__(self, parent=None):
@@ -117,7 +174,7 @@ class TextEditor(QMainWindow):
     MAX_ZOOM = 500
     ZOOM_STEP_SIZE = 10
     DEFAULT_ZOOM = 100
-    ZOOM_FONT_MOD = 12
+    BASE_FONT_SIZE = 12
 
     def __init__(self):
         super().__init__()
@@ -130,27 +187,26 @@ class TextEditor(QMainWindow):
         self.setWindowTitle(self.APP_TITLE)
         self.resize(800, 600)
 
-        self.tabs = {}  # widget -> {file, saved}, order should be preserved when moving tabs
+        self.tabs = TabsData()  # widget -> {file, saved}, order should be preserved when moving tabs
         self.closed_this_session = [] # order is not important, as its already session scoped
         self.recent_files = [] # chronologically ordered, multi-session context
         self.current_zoom = self.DEFAULT_ZOOM
         self.editor_enabled = True
         self.autosave_enabled = False
-        self.search_state = {
-            "text": "",
-            "results": [],
-            "index": -1
-        }
+        self.search_state = SearchState()
         
         self.status = self.statusBar()
         self.cursor_status = QLabel()
         self.status.addPermanentWidget(self.cursor_status)
+        
         self.zoom_status = QLabel()
+        self.zoom_status.setText("100%")
         self.status.addPermanentWidget(self.zoom_status)
-        self.filetype_status = QLabel()
-        self.status.addPermanentWidget(self.filetype_status)
+        
+        self.filesize_status = QLabel()
+        self.status.addPermanentWidget(self.filesize_status)
 
-        self.font = QFont("Consolas", self.ZOOM_FONT_MOD)
+        self.font = QFont("Consolas", self.BASE_FONT_SIZE)
 
         # Central widget
         self.tab_widget = QTabWidget()
@@ -171,23 +227,28 @@ class TextEditor(QMainWindow):
         self.find_bar = FindBar(self)
         self.clear_search_position_label()
         self.tab_widget.currentChanged.connect(self.on_tab_changed)
+        self.on_tab_changed(None)
+
+    def format_size(self, size_bytes):
+        for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
+            if size_bytes < 1024:
+                return f"{size_bytes:.2f} {unit}"
+            size_bytes /= 1024
+        return f"{size_bytes:.2f} PB"
 
     # =========================
     # TAB SYSTEM
     # =========================
-    def get_doc_id(self, editor):
-        return id(editor.document())
-    
     def maybe_save_editor(self, editor):
         data = self.tabs[editor]
 
-        if data["saved"]:
+        if data.saved:
             return True
 
         reply = QMessageBox.question(
             self,
             "Unsaved Changes",
-            f"Save changes to {data['file'].name if data['file'] else 'Untitled'}?",
+            f"Save changes to {data.file.name if data.file else 'Untitled'}?",
             QMessageBox.StandardButton.Save |
             QMessageBox.StandardButton.Discard |
             QMessageBox.StandardButton.Cancel
@@ -211,9 +272,9 @@ class TextEditor(QMainWindow):
         index = self.tab_widget.indexOf(editor)
         self.tab_widget.removeTab(index)
         
-        if self.tabs[editor]['file'] in self.closed_this_session:
-            self.closed_this_session.remove(self.tabs[editor]['file'])
-        self.closed_this_session.append(self.tabs[editor]['file'])
+        if self.tabs[editor].file in self.closed_this_session:
+            self.closed_this_session.remove(self.tabs[editor].file)
+        self.closed_this_session.append(self.tabs[editor].file)
         
         del self.tabs[editor]
 
@@ -223,7 +284,7 @@ class TextEditor(QMainWindow):
     
     def close_all_tabs(self):
         editors = list(self.tabs.keys())
-        not_saved = [editor for editor in editors if not self.tabs[editor]["saved"]]
+        not_saved = [editor for editor in editors if not self.tabs[editor].saved]
 
         if not_saved:
             reply = QMessageBox.question(
@@ -245,9 +306,9 @@ class TextEditor(QMainWindow):
             index = self.tab_widget.indexOf(editor)
             self.tab_widget.removeTab(index)
             
-            if self.tabs[editor]['file'] in self.closed_this_session:
-                self.closed_this_session.remove(self.tabs[editor]['file'])
-            self.closed_this_session.append(self.tabs[editor]['file'])
+            if self.tabs[editor].file in self.closed_this_session:
+                self.closed_this_session.remove(self.tabs[editor].file)
+            self.closed_this_session.append(self.tabs[editor].file)
             
             del self.tabs[editor]
 
@@ -259,11 +320,11 @@ class TextEditor(QMainWindow):
         editor = self.tab_widget.widget(index)
         data = self.tabs[editor]
 
-        if not data["saved"]:
+        if not data.saved:
             reply = QMessageBox.question(
                 self,
                 "Unsaved Changes",
-                f"Save changes to {data['file'].name if data['file'] else 'Untitled'}?",
+                f"Save changes to {data.file.name if data.file else 'Untitled'}?",
                 QMessageBox.StandardButton.Save |
                 QMessageBox.StandardButton.Discard |
                 QMessageBox.StandardButton.Cancel
@@ -275,7 +336,7 @@ class TextEditor(QMainWindow):
             elif reply == QMessageBox.StandardButton.Cancel:
                 return
 
-        file = data['file']
+        file = data.file
         self.tab_widget.removeTab(index)
         del self.tabs[editor]
 
@@ -294,7 +355,7 @@ class TextEditor(QMainWindow):
         self.rebuild_recent_files()
     
     def create_new_tab(self, content="", file=None):
-        if any(file == tab["file"] for tab in self.tabs.values()):
+        if any(file == tab.file for tab in self.tabs.values()):
             return
         
         editor = QTextEdit()
@@ -305,10 +366,7 @@ class TextEditor(QMainWindow):
         index = self.tab_widget.addTab(editor, file.name if file else self.DEFAULT_FILENAME)
         self.tab_widget.setCurrentIndex(index)
 
-        self.tabs[editor] = {
-            "file": file,
-            "saved": True
-        }
+        self.tabs[editor] = TabData(editor, file)
 
         editor.textChanged.connect(lambda e=editor: self.on_text_changed(e))
         editor.cursorPositionChanged.connect(lambda e=editor: self.on_cursor_moved(e))
@@ -329,14 +387,14 @@ class TextEditor(QMainWindow):
 
     def get_current_file(self):
         editor = self.tab_widget.currentWidget()
-        return self.tabs[editor]["file"]
+        return self.tabs[editor].file
 
     def update_tab_title(self, editor):
         index = self.tab_widget.indexOf(editor)
         data = self.tabs[editor]
 
-        name = data["file"].name if data["file"] else self.DEFAULT_FILENAME
-        if not data["saved"]:
+        name = data.file.name if data.file else self.DEFAULT_FILENAME
+        if not data.saved:
             name += " ●"
 
         self.tab_widget.setTabText(index, name)
@@ -349,6 +407,7 @@ class TextEditor(QMainWindow):
         if event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.MiddleButton:
                 self.reset_zoom()
+                return True
         
         if event.type() == QEvent.Type.Wheel:
             # Check if Control is held
@@ -356,19 +415,19 @@ class TextEditor(QMainWindow):
                 delta = event.angleDelta().y()
                 
                 if delta > 0:
-                    self.zoom_in() # Replace with your zoom/logic
+                    self.zoom_in()
                 elif delta < 0:
-                    self.zoom_out() # Replace with your zoom/logic
-                
-                # Returning True blocks the "Page Scroll" from happening
+                    self.zoom_out()
                 return True
                 
         return super().eventFilter(obj, event)
     
     def on_tab_changed(self, index):
         editor = self.get_current_editor()
-        if not editor:
+        if not editor or editor not in self.tabs:
             return
+
+        file = self.tabs[editor].file
 
         self.clear_search()
         
@@ -377,28 +436,37 @@ class TextEditor(QMainWindow):
             self.search(text)
             
         self.on_cursor_moved(editor) # moved across files
+        self.update_filesize_status(self.tabs[editor])
     
     def on_cursor_moved(self, editor):
         cursor = editor.textCursor()
         line = cursor.blockNumber() + 1
-        col = cursor.columnNumber()
-        self.cursor_status.setText(f"Ln {line}, Col {col}")
+        col = cursor.columnNumber() + 1
+        sel = len(cursor.selectedText())
+        
+        status_text = f"Ln {line}, Col {col}"
+        if sel > 0:
+            status_text += f", Selected {sel}"
+        
+        self.cursor_status.setText(status_text)
     
     def on_text_changed(self, editor):
         data = self.tabs[editor]
-        data["saved"] = False
+        data.saved = False
         self.update_tab_title(editor)
 
         self.typing_timer.start(1000)
 
     def on_typing_stopped(self):
+        editor = self.get_current_editor()
+        data = self.tabs[editor]
+        
+        self.update_filesize_status(data)
+        
         if not self.autosave_enabled:
             return
 
-        editor = self.get_current_editor()
-        data = self.tabs[editor]
-
-        if data["file"]:
+        if data.file:
             self.save_editor(editor)
 
     # =========================
@@ -472,7 +540,7 @@ class TextEditor(QMainWindow):
 
     def insert_timestamp(self):
         editor = self.get_current_editor()
-        file_path = self.tabs[editor].get('file')
+        file_path = self.tabs[editor].file
         suffix = file_path.suffix.lower() if file_path else ''
         
         now = datetime.now().astimezone()
@@ -494,7 +562,7 @@ class TextEditor(QMainWindow):
         editor = self.get_current_editor()
         cursor = editor.textCursor()
         
-        file_path = self.tabs[editor].get('file')
+        file_path = self.tabs[editor].file
         suffix = file_path.suffix.lower() if file_path else ''
         
         if suffix == '.md':
@@ -531,11 +599,7 @@ class TextEditor(QMainWindow):
         self.find_bar.show_bar()
         
     def clear_search(self):
-        self.search_state = {
-            "text": "",
-            "results": [],
-            "index": -1
-        }
+        self.search_state.clear()
 
         editor = self.get_current_editor()
         if editor:
@@ -547,7 +611,7 @@ class TextEditor(QMainWindow):
         if not editor:
             return
 
-        self.search_state["text"] = text
+        self.search_state.text = text
 
         if not text:
             self.clear_search()
@@ -565,24 +629,24 @@ class TextEditor(QMainWindow):
                 break
             results.append((cursor.selectionStart(), cursor.selectionEnd()))
 
-        self.search_state["results"] = results
-        self.search_state["index"] = 0 if results else -1
+        self.search_state.results = results
+        self.search_state.index = 0 if results else -1
 
         self.apply_highlights()
         self.update_search_position_label(1, len(results))
         
     def search_next(self):
-        r = self.search_state["results"]
+        r = self.search_state.results
         if not r:
             return
-        self.search_state["index"] = (self.search_state["index"] + 1) % len(r)
+        self.search_state.index = (self.search_state.index + 1) % len(r)
         self.jump()
 
     def search_prev(self):
-        r = self.search_state["results"]
+        r = self.search_state.results
         if not r:
             return
-        self.search_state["index"] = (self.search_state["index"] - 1) % len(r)
+        self.search_state.index = (self.search_state.index - 1) % len(r)
         self.jump()    
     
     def jump(self):
@@ -590,8 +654,8 @@ class TextEditor(QMainWindow):
         if not editor:
             return
 
-        r = self.search_state["results"]
-        i = self.search_state["index"]
+        r = self.search_state.results
+        i = self.search_state.index
 
         if i < 0 or i >= len(r):
             return
@@ -625,7 +689,7 @@ class TextEditor(QMainWindow):
         if not editor:
             return
 
-        results = self.search_state["results"]
+        results = self.search_state.results
         if not results:
             editor.setExtraSelections([])
             return
@@ -637,7 +701,7 @@ class TextEditor(QMainWindow):
         current.setBackground(QColor("orange"))
 
         extra = []
-        idx = self.search_state["index"]
+        idx = self.search_state.index
 
         doc = editor.document()
 
@@ -758,25 +822,44 @@ class TextEditor(QMainWindow):
         editor = self.get_current_editor()
         self.save_editor(editor)
 
+    def update_filesize_status(self, data):
+        editor = self.get_current_editor()
+        if not editor:
+            self.filesize_status.setText("0 B")
+            return
+
+        ram_size = len(editor.toPlainText().replace('\n', '\r\n').encode("utf-8"))
+
+        if data.file and data.file.exists():
+            disk_size = data.file.stat().st_size
+        else:
+            disk_size = 0
+
+        if not data.saved:
+            self.filesize_status.setText(f'{self.format_size(disk_size)} 🡢 {self.format_size(ram_size)}')
+        else:
+            self.filesize_status.setText(self.format_size(disk_size))
+
     def save_editor(self, editor):
         data = self.tabs[editor]
-        if data["saved"]:
+        if data.saved:
             return True
 
-        if not data["file"]:
+        if not data.file:
             path, _ = QFileDialog.getSaveFileName(self)
             if not path:
                 return False 
-            data["file"] = Path(path)
+            data.file = Path(path)
 
-        data["file"].write_text(editor.toPlainText(), encoding="utf-8")
-        data["saved"] = True
+        data.file.write_text(editor.toPlainText(), encoding="utf-8")
+        data.saved = True
         self.update_tab_title(editor)
+        self.update_filesize_status(data)
         return True
     
     def save_all_editors(self):
-        for editor in self.tabs.keys():
-            if not self.save_editor(editor):
+        for tab in self.tabs.values():
+            if not self.save_editor(tab.editor):
                 # User cancelled → stop saving further
                 return False
         return True
@@ -792,7 +875,7 @@ class TextEditor(QMainWindow):
         if not path:
             return
 
-        data["file"] = Path(path)
+        data.file = Path(path)
         self.save_editor(editor)
 
     # =========================
@@ -802,11 +885,28 @@ class TextEditor(QMainWindow):
         editor = self.get_current_editor()
         menu = QMenu()
 
-        menu.addAction("Cut", editor.cut, "Ctrl+X")
-        menu.addAction("Copy", editor.copy, "Ctrl+C")
-        menu.addAction("Paste", editor.paste, "Ctrl+V")
+        cursor = editor.textCursor()
+        has_selection = cursor.hasSelection()
+        clipboard = QApplication.clipboard()
+        has_clipboard = bool(clipboard.text())
+
+        cut_action = self.create_action("Cut", editor.cut, "Ctrl+X")
+        cut_action.setEnabled(has_selection)
+        menu.addAction(cut_action)
+
+        copy_action = self.create_action("Copy", editor.copy, "Ctrl+C")
+        copy_action.setEnabled(has_selection)
+        menu.addAction(copy_action)
+
+        paste_action = self.create_action("Paste", editor.paste, "Ctrl+V")
+        paste_action.setEnabled(has_clipboard)
+        menu.addAction(paste_action)
+
         menu.addSeparator()
-        menu.addAction("Web Search", self.web_search)
+        web_search_action = self.create_action("Web Search", self.web_search)
+        web_search_action.setEnabled(has_selection)
+        
+        menu.addAction(web_search_action)
 
         menu.exec(editor.mapToGlobal(pos))
     
@@ -852,7 +952,7 @@ class TextEditor(QMainWindow):
             sel_lines = sel_words = sel_chars = sel_chars_ws = 0
         
         QMessageBox.information(self, "Word Count", (
-                f"       Document  Selected\n"
+                f"       Doc       Sel\n"
                 f"Lines  {lines:8}  {sel_lines:8}\n"
                 f"Words  {words:8}  {sel_words:8}\n"
                 f"Chars  {chars_ws:8}  {sel_chars_ws:8}\n"
@@ -864,20 +964,20 @@ class TextEditor(QMainWindow):
     # ZOOM
     # =========================
     def update_zoom(self):
-        size = int(12 * self.current_zoom / 100)
+        size = int(self.BASE_FONT_SIZE * self.current_zoom / 100)
         self.font.setPointSize(size)
 
-        for editor in self.tabs:
-            editor.setFont(self.font)
+        for tab in self.tabs.values():
+            tab.editor.setFont(self.font)
             
         self.zoom_status.setText(f'{self.current_zoom}%')
 
     def zoom_in(self):
-        self.current_zoom = max(self.MIN_ZOOM, self.current_zoom + self.ZOOM_STEP_SIZE)
+        self.current_zoom = min(self.MAX_ZOOM, self.current_zoom + self.ZOOM_STEP_SIZE)
         self.update_zoom()
 
     def zoom_out(self):
-        self.current_zoom = min(self.MAX_ZOOM, self.current_zoom - self.ZOOM_STEP_SIZE)
+        self.current_zoom = max(self.MIN_ZOOM, self.current_zoom - self.ZOOM_STEP_SIZE)
         self.update_zoom()
 
     def reset_zoom(self):
@@ -888,21 +988,21 @@ class TextEditor(QMainWindow):
     # SYSTEM
     # =========================
     def closeEvent(self, event):
-        for editor, data in list(self.tabs.items()):
-            if not data["saved"]:
-                self.tab_widget.setCurrentWidget(editor)
+        for data in list(self.tabs.values()):
+            if not data.saved:
+                self.tab_widget.setCurrentWidget(data.editor)
 
                 reply = QMessageBox.question(
                     self,
                     "Unsaved Changes",
-                    f"Save changes to {data['file'].name if data['file'] else 'Untitled'}?",
+                    f"Save changes to {data.file.name if data.file else 'Untitled'}?",
                     QMessageBox.StandardButton.Save |
                     QMessageBox.StandardButton.Discard |
                     QMessageBox.StandardButton.Cancel
                 )
 
                 if reply == QMessageBox.StandardButton.Save:
-                    if not self.save_editor(editor):
+                    if not self.save_editor(data.editor):
                         event.ignore()
                         return
                 elif reply == QMessageBox.StandardButton.Cancel:
@@ -955,7 +1055,7 @@ class TextEditor(QMainWindow):
             app_data = {
                 "editor_enabled": self.editor_enabled,
                 "autosave enabled": self.autosave_enabled,
-                "open files": [str(tab['file']) for tab in self.tabs.values()],
+                "open files": [str(tab.file) for tab in self.tabs.values()],
                 "recent files": [str(file) for file in self.recent_files],
                 "prev open files": [str(file) for file in self.closed_this_session]
             }
