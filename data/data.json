@@ -5,8 +5,9 @@
   },
   "session": {
     "open files": [
-      "C:\\Users\\robert\\Documents\\test.txt",
-      "C:\\Users\\robert\\Documents\\test4.txt"
+      "C:\\Users\\robert\\Documents\\test4.txt",
+      "C:\\Users\\robert\\Documents\\test.json",
+      "C:\\Users\\robert\\Documents\\VS Code Files\\File Server\\protocol design.txt"
     ],
     "recent files": [
       {
@@ -19,11 +20,15 @@
       },
       {
         "file": "C:\\Users\\robert\\Documents\\test4.txt",
-        "atime": 1776117466.604074
+        "atime": 1776118854.187005
       },
       {
-        "file": "C:\\Users\\robert\\Documents\\test.txt",
-        "atime": 1776117466.598956
+        "file": "C:\\Users\\robert\\Documents\\test.json",
+        "atime": 1776118854.192757
+      },
+      {
+        "file": "C:\\Users\\robert\\Documents\\VS Code Files\\File Server\\protocol design.txt",
+        "atime": 1776118872.615282
       }
     ],
     "closed files": [
@@ -40,12 +45,12 @@
         "atime": 1776117302.922269
       },
       {
-        "file": "C:\\Users\\robert\\Documents\\test.json",
-        "atime": 1776117502.497034
-      },
-      {
         "file": "C:\\Users\\robert\\Documents\\VS Code Files\\TextEditor\\TODO.md",
         "atime": 1776117509.140449
+      },
+      {
+        "file": "C:\\Users\\robert\\Documents\\test.txt",
+        "atime": 1776118795.926886
       }
     ]
   }

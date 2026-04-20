@@ -1,5 +1,5 @@
-Move text-editor v1 to v2
-
---- 
-
-2026-04-12
+Replace Logic
+Cross File Find
+Show_more_recent
+Code-Like auto complete:
+<>, (), [], {}, "", ''. ``

@@ -2,9 +2,11 @@
 
 from contextlib import contextmanager
 from datetime import datetime
+import itertools
 import sys
 import json
 import re
+import weakref
 import webbrowser
 from pathlib import Path
 from urllib.parse import quote
@@ -32,34 +34,6 @@ class TabData:
         self.file = file
         self.saved = saved
         self.search_state = SearchState()
-
-class TabsData:
-    def __init__(self):
-        self.data = dict()
-
-    def __getitem__(self, key):
-        return self.data[id(key)]
-
-    def __setitem__(self, key, value):
-        self.data[id(key)] = value
-
-    def __delitem__(self, key):
-        del self.data[id(key)]
-
-    def __contains__(self, key):
-        return id(key) in self.data
-
-    def __iter__(self):
-        return iter(self.data.values())
-
-    def ids(self):
-        return self.data.keys()
-
-    def values(self):
-        return self.data.values()
-    
-    def items(self):
-        return self.data.items()
 
 class SearchState:
     DEFAULT_TEXT = ""
@@ -241,6 +215,8 @@ class TextEditor(QMainWindow):
     ZOOM_STEP_SIZE = 10
     DEFAULT_ZOOM = 100
     BASE_FONT_SIZE = 12
+    
+    HEADER_PATTERN = re.compile(r"^<h([1-6])>(.*?)</h\1>$")
 
     def __init__(self):
         super().__init__()
@@ -253,7 +229,7 @@ class TextEditor(QMainWindow):
         self.setWindowTitle(self.APP_TITLE)
         self.resize(800, 600)
 
-        self.tabs = TabsData()  # widget -> {file, saved}, order should be preserved when moving tabs
+        self.tabs = weakref.WeakKeyDictionary()  # widget -> {file, saved}, order should be preserved when moving tabs
         self.closed_this_session = {} # order is not important, as its already session scoped
         self.recent_files = {} # chronologically ordered, multi-session context
         self.current_zoom = self.DEFAULT_ZOOM
@@ -382,37 +358,19 @@ class TextEditor(QMainWindow):
         editor = self.tab_widget.widget(index)
         data = self.tabs[editor]
 
-        if not data.saved:
-            reply = QMessageBox.question(
-                self,
-                "Unsaved Changes",
-                f"Save changes to {data.file.name if data.file else 'Untitled'}?",
-                QMessageBox.StandardButton.Save |
-                QMessageBox.StandardButton.Discard |
-                QMessageBox.StandardButton.Cancel
-            )
-
-            if reply == QMessageBox.StandardButton.Save:
-                if not self.save_editor(editor):
-                    return
-            elif reply == QMessageBox.StandardButton.Cancel:
-                return
+        if not self.maybe_save_editor(editor):
+            return
 
         file = data.file
+
         self.tab_widget.removeTab(index)
         del self.tabs[editor]
 
-        # Only track real files
         if file:
             self.closed_this_session[file] = FileAccessData(file)
-            
-            if file in self.open_files:
-                self.open_files.remove(file)
-            
-            # Remove from recent temporarily (we want it under "reopen closed" until reopened)
-            if file in self.recent_files:
-                #self.recent_files.remove(file)
-                self.recent_files.pop(file, None)
+
+            # Remove from recent temporarily
+            self.recent_files.pop(file, None)
 
         if self.tab_widget.count() == 0:
             self.create_new_tab()
@@ -441,10 +399,10 @@ class TextEditor(QMainWindow):
         # File is now open → remove from closed_this_session if present
         if file:
             self.closed_this_session.pop(file, None)
-                
+
             if file not in self.open_files:    
                 self.open_files.append(file)
-                
+
             self.push_recent_file(file)
             self.truncate_recent_files()
         
@@ -622,6 +580,259 @@ class TextEditor(QMainWindow):
     # =========================
     # INSERTION
     # =========================
+
+    def insert_ordered_list(self):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        file_path = self.tabs[editor].file
+        file_suffix = file_path.suffix.lower() if file_path else ''
+        cursor = editor.textCursor()
+
+        line_text = cursor.selection().toPlainText()
+        if not line_text.strip():
+            return
+
+        text = line_text.strip()
+        rows = [r.strip() for r in text.splitlines() if r.strip()]
+        
+        if file_suffix in (".html", ".ejs"):
+            items = '\n    '.join(f'<li>{row}</li>' for row in rows)
+            text = f"<ol>\n    {items}\n</ol>"
+        else:
+            text = '\n'.join(f'{i+1}. {row}' for i, row in enumerate(rows))
+            
+        cursor.beginEditBlock()
+        cursor.insertText(text) 
+        cursor.endEditBlock()
+        
+    def insert_unordered_list(self):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        file_path = self.tabs[editor].file
+        file_suffix = file_path.suffix.lower() if file_path else ''
+        cursor = editor.textCursor()
+
+        line_text = cursor.selection().toPlainText()
+        if not line_text.strip():
+            return
+
+        text = line_text.strip()
+        rows = [r.strip() for r in text.splitlines() if r.strip()]
+        
+        if file_suffix in (".html", ".ejs"):
+            items = '\n    '.join(f'<li>{row}</li>' for row in rows)
+            text = f"<ul>\n    {items}\n</ul>"
+        else:
+            text = '\n'.join(f'- {row}' for row in rows)
+            
+        cursor.beginEditBlock()
+        cursor.insertText(text) 
+        cursor.endEditBlock()
+
+    def insert_table(self):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        file_path = self.tabs[editor].file
+        file_suffix = file_path.suffix.lower() if file_path else ''
+        cursor = editor.textCursor()
+        
+        data = [[], [], []]
+        use_first_row_as_header = True
+
+        if file_suffix in (".html", ".ejs"):
+            table_rows = []
+
+            if use_first_row_as_header:
+                ths = '\n    '.join(f"<th>{col.strip()}</th>" for col in data[0])
+                table_rows.append(f'<tr>{ths}</tr>')
+                table_data = data[1:]
+            else:
+                table_data = data
+
+            for row in table_data:
+                tds = '\n    '.join(f"<td>{col.strip()}</td>" for col in row)
+                table_rows.append(f'<tr>{tds}</tr>')
+                    
+            content = '\n    '.join(table_rows)
+            text = f'<table>\n    {content}\n</table>\n'
+
+        else:
+            if use_first_row_as_header:
+                header_row = data[0]
+                table_data = data[1:]
+                col_count = len(header_row)
+            else:
+                table_data = data
+                col_count = max((len(row) for row in data), default=0)
+
+            # Compute column widths
+            widths = [0] * col_count
+            for row in data:
+                for i in range(col_count):
+                    val = row[i] if i < len(row) else ''
+                    widths[i] = max(widths[i], len(val))
+
+            table_rows = []
+
+            # Header row
+            if use_first_row_as_header:
+                row = [
+                    (header_row[i] if i < len(header_row) else '').ljust(widths[i])
+                    for i in range(col_count)
+                ]
+                table_rows.append(f"| {' | '.join(row)} |")
+
+                # Separator row
+                sep = [ '-' * widths[i] for i in range(col_count) ]
+                table_rows.append(f"| {' | '.join(sep)} |")
+
+            # Data rows
+            for row in table_data:
+                cells = [
+                    (row[i] if i < len(row) else '').ljust(widths[i])
+                    for i in range(col_count)
+                ]
+                table_rows.append(f"| {' | '.join(cells)} |")
+
+            text = '\n'.join(table_rows)
+
+        cursor.insertText(text)
+
+    def insert_header(self, level):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        file_path = self.tabs[editor].file
+        file_suffix = file_path.suffix.lower() if file_path else ''
+        cursor = editor.textCursor()
+
+        line_text = cursor.block().text()
+        if not line_text.strip():
+            return
+
+        text = line_text.strip()
+
+        if file_suffix in (".html", ".ejs"):
+            match = self.HEADER_PATTERN.match(text)
+
+            if match:
+                current_level = int(match.group(1))
+                content = match.group(2)
+
+                # toggle off if same level
+                if current_level == level:
+                    text = content
+                else:
+                    text = f"<h{level}>{content}</h{level}>"
+            else:
+                text = f"<h{level}>{text}</h{level}>"
+
+        else:
+            header = "#" * level + " "
+            stripped = text.lstrip()
+
+            if stripped.startswith(header):
+                text = stripped[len(header):]
+            else:
+                text = f"{header}{text}"
+
+        cursor.movePosition(cursor.MoveOperation.StartOfBlock)
+        cursor.movePosition(cursor.MoveOperation.EndOfBlock, cursor.MoveMode.KeepAnchor)
+        cursor.insertText(text)
+
+    def insert_bold(self):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        file_path = self.tabs[editor].file
+        file_suffix = file_path.suffix.lower() if file_path else ''
+        cursor = editor.textCursor()
+
+        line_text = cursor.block().text()
+        if not line_text.strip():
+            return
+
+        text = line_text.strip()
+
+        if file_suffix in (".html", ".ejs"):
+            # <strong>text</strong> -> text
+            if text.startswith("<strong>") and text.endswith("</strong>") and len(text) >= 17:
+                text = text[8:-9]
+            else:
+                text = f"<strong>{text}</strong>"
+
+        else:
+            # ***text*** -> *text* (remove bold, keep italic)
+            if text.startswith("***") and text.endswith("***") and len(text) >= 6:
+                text = text[2:-2]
+
+            # **text** -> text (disable bold)
+            elif text.startswith("**") and text.endswith("**") and len(text) >= 4:
+                text = text[2:-2]
+
+            # *text* -> ***text*** (add bold, keep italic)
+            elif text.startswith("*") and text.endswith("*") and len(text) >= 2:
+                inner = text[1:-1]
+                text = f"***{inner}***"
+
+            # text -> **text**
+            else:
+                text = f"**{text}**"
+
+        cursor.movePosition(cursor.MoveOperation.StartOfBlock)
+        cursor.movePosition(cursor.MoveOperation.EndOfBlock, cursor.MoveMode.KeepAnchor)
+        cursor.insertText(text)
+        
+    def insert_italic(self):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        file_path = self.tabs[editor].file
+        file_suffix = file_path.suffix.lower() if file_path else ''
+        cursor = editor.textCursor()
+
+        line_text = cursor.block().text()
+        if not line_text.strip():
+            return
+
+        text = line_text.strip()
+
+        if file_suffix in (".html", ".ejs"):
+            # <strong>text</strong> -> text
+            if text.startswith("<em>") and text.endswith("</em>") and len(text) >= 9:
+                text = text[4:-5]
+            else:
+                text = f"<em>{text}</em>"
+
+        else:
+            # ***text*** -> **text** (remove italic, keep bold)
+            if text.startswith("***") and text.endswith("***") and len(text) >= 6:
+                text = text[1:-1]
+
+            # **text** -> ***text*** (add italic, keep bold)
+            elif text.startswith("**") and text.endswith("**") and len(text) >= 4:
+                text = f"*{text}*"
+
+            # *text* -> text (remove italic)
+            elif text.startswith("*") and text.endswith("*") and len(text) >= 2:
+                text = text[1:-1]
+
+            # text -> *text*
+            else:
+                text = f"*{text}*"
+
+        cursor.movePosition(cursor.MoveOperation.StartOfBlock)
+        cursor.movePosition(cursor.MoveOperation.EndOfBlock, cursor.MoveMode.KeepAnchor)
+        cursor.insertText(text)
 
     def insert_timestamp(self):
         editor = self.get_current_editor()
@@ -898,59 +1109,91 @@ class TextEditor(QMainWindow):
     # RECENT FILE MENU
     # =========================
     
+    def make_open_action(self, file):
+        return lambda _: self.headless_open_file(file)
+    
     # rebuild_recent_files: always show closed first, then recent
     def rebuild_recent_files(self):
         self.recent_file_menu.clear()
-        
+
+        # --- Reopen Closed ---
         self.recent_file_menu.addAction(
-            self.create_action("Reopen Closed This Session", self.reopen_closed_this_session)
+            self.create_action(
+                "Reopen Closed This Session",
+                self.reopen_closed_this_session
+            )
         )
         self.recent_file_menu.addSeparator()
-        
-        # closed files menu
-        # if any(file == file_data for file_data in self.closed_this_session.values()):
-        
+
         now = datetime.now().astimezone()
-        
-        data = sorted(self.closed_this_session.values(), key=lambda e: e.access_timestamp, reverse=True)
-        for file_data in data:
-            if any(file_data.file == cts.file for cts in self.closed_this_session.values()):
-                continue
-            time_str = timeago.format(datetime.fromtimestamp(file_data.access_timestamp, tz=now.tzinfo), now)
+
+        # --- Closed This Session ---
+        closed_sorted = sorted(
+            self.closed_this_session.values(),
+            key=lambda x: x.access_timestamp,
+            reverse=True
+        )
+
+        for data in closed_sorted:
+            time_str = timeago.format(
+                datetime.fromtimestamp(data.access_timestamp, tz=now.tzinfo),
+                now
+            )
+
             self.recent_file_menu.addAction(
-                self.create_action(f'{file_data.file.name} - {time_str}', lambda _, f=file_data.file: self.headless_open_file(f))
+                self.create_action(
+                    f"{data.file.name} — {time_str}",
+                    self.make_open_action(data.file)
+                )
             )
 
         self.recent_file_menu.addSeparator()
-        
-        # recent files menu
-        data = sorted(self.recent_files.values(), key=lambda e: e.access_timestamp, reverse=True)
-        for file_data in data:
-            if any(file_data.file == cts.file for cts in self.closed_this_session.values()):
+
+        # --- Recent Files ---
+        recent_sorted = sorted(
+            self.recent_files.values(),
+            key=lambda x: x.access_timestamp,
+            reverse=True
+        )
+
+        for data in recent_sorted[:self.MAX_VISIBLE_RECENT_FILES]:
+            # Skip if currently in closed_this_session
+            if data.file in self.closed_this_session:
                 continue
-            time_str = timeago.format(datetime.fromtimestamp(file_data.access_timestamp, tz=now.tzinfo), now)
-            self.recent_file_menu.addAction(
-                self.create_action(f'{file_data.file.name} - {time_str}', lambda _, f=file_data.file: self.headless_open_file(f))
+
+            time_str = timeago.format(
+                datetime.fromtimestamp(data.access_timestamp, tz=now.tzinfo),
+                now
             )
-        # datetime.fromtimestamp(file_data.access_timestamp).strftime("%Y-%m-%d %H:%M:%S")
-        
+
+            self.recent_file_menu.addAction(
+                self.create_action(
+                    f"{data.file.name} — {time_str}",
+                    self.make_open_action(data.file)
+                )
+            )
+
         self.recent_file_menu.addSeparator()
-        self.recent_file_menu.addAction(self.create_action("Show More", self.show_more_recent))
-        self.recent_file_menu.addSeparator()
-        self.recent_file_menu.addAction(self.create_action("Clear Previous Files...", self.clear_recent))
+        self.recent_file_menu.addAction(
+            self.create_action("Clear Previous Files...", self.clear_recent)
+        )
 
     def reopen_closed_this_session(self):
-        # sort for predictable order if needed
-        data = self.closed_this_session.values()
-        for file_data in data:
-            file = file_data.file
+        files = list(self.closed_this_session.values())
+
+        for data in files:
+            file = data.file
             try:
                 content = file.read_text(encoding="utf-8")
                 self.create_new_tab(content, file)
+
+                self.push_recent_file(file)
+
             except Exception:
                 pass
-            self.closed_this_session.pop(file, None)
-            self.push_recent_file(file)
+
+        self.closed_this_session.clear()
+
         self.truncate_recent_files()
         self.rebuild_recent_files()
     
@@ -965,12 +1208,22 @@ class TextEditor(QMainWindow):
     # FILE OPS
     # =========================
     def push_recent_file(self, file):
-        if file in self.recent_files.keys():
-            self.recent_files[file] = FileAccessData(file)
+        if not file:
+            return
+
+        self.recent_files[file] = FileAccessData(file)
         
     def truncate_recent_files(self):
-        #self.recent_files = self.recent_files[:self.MAX_RECENT_FILES]
-        pass
+        if len(self.recent_files) <= self.MAX_RECENT_FILES:
+            return
+
+        sorted_items = sorted(
+            self.recent_files.items(),
+            key=lambda kv: kv[1].access_timestamp,
+            reverse=True
+        )
+
+        self.recent_files = dict(sorted_items[:self.MAX_RECENT_FILES])
     
     def headless_open_file(self, file):
         content = file.read_text(encoding="utf-8")
