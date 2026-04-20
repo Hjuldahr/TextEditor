@@ -1,6 +1,6 @@
 {
   "preferences": {
-    "readonly": true,
+    "readonly": false,
     "autosave": true
   },
   "session": {
@@ -20,15 +20,15 @@
       },
       {
         "file": "C:\\Users\\robert\\Documents\\test4.txt",
-        "atime": 1776118854.187005
+        "atime": 1776667669.303265
       },
       {
         "file": "C:\\Users\\robert\\Documents\\test.json",
-        "atime": 1776118854.192757
+        "atime": 1776667669.305033
       },
       {
         "file": "C:\\Users\\robert\\Documents\\VS Code Files\\File Server\\protocol design.txt",
-        "atime": 1776118872.615282
+        "atime": 1776667669.306301
       }
     ],
     "closed files": [

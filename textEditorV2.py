@@ -2,6 +2,7 @@
 
 from contextlib import contextmanager
 from datetime import datetime
+from functools import partial
 import itertools
 import sys
 import json
@@ -246,6 +247,9 @@ class TextEditor(QMainWindow):
         
         self.filesize_status = QLabel()
         self.status.addPermanentWidget(self.filesize_status)
+        
+        self.readonly_status = QLabel()
+        self.status.addPermanentWidget(self.readonly_status)
 
         self.font = QFont("Consolas", self.BASE_FONT_SIZE)
 
@@ -260,8 +264,8 @@ class TextEditor(QMainWindow):
         self.typing_timer.setSingleShot(True)
         self.typing_timer.timeout.connect(self.on_typing_stopped)
 
-        self.create_menus()
         self.load_app_data()
+        self.create_menus()
         self.rebuild_recent_files()
         
         # Child Widgets
@@ -436,6 +440,7 @@ class TextEditor(QMainWindow):
     # =========================
     def eventFilter(self, obj, event):
         # Turns out my mouse wheel button is dead and its not pyt6... damn it
+
         if event.type() == QEvent.Type.MouseButtonPress:
             if event.button() == Qt.MouseButton.MiddleButton:
                 self.reset_zoom()
@@ -532,6 +537,7 @@ class TextEditor(QMainWindow):
         self.file_menu.addSeparator()
         autosave_action = QAction("Auto Save", self)
         autosave_action.setCheckable(True)
+        autosave_action.setChecked(self.autosave_enabled)
         autosave_action.triggered.connect(self.toggle_autosave)
         self.file_menu.addAction(autosave_action)
 
@@ -553,6 +559,7 @@ class TextEditor(QMainWindow):
         self.edit_menu.addSeparator()
         readonly_action = QAction("Readonly", self)
         readonly_action.setCheckable(True)
+        readonly_action.setChecked(self.readonly_enabled)
         readonly_action.setShortcut(QKeySequence("Ctrl+L"))
         readonly_action.triggered.connect(self.toggle_readonly)
         self.edit_menu.addAction(readonly_action)
@@ -563,8 +570,27 @@ class TextEditor(QMainWindow):
         self.view_menu.addAction(self.create_action("Reset Zoom", self.reset_zoom, "Ctrl+0"))
 
         self.insert_menu = menubar.addMenu("Insert")
+        self.insert_menu.addAction(self.create_action("Link", self.insert_link))
+        self.insert_menu.addAction(self.create_action("Table", self.insert_table))
         self.insert_menu.addAction(self.create_action("Timestamp", self.insert_timestamp))
         self.insert_menu.addAction(self.create_action("Seperator", self.insert_separator))
+
+        self.format_menu = menubar.addMenu("Format")
+        self.header_menu = QMenu("Headings", self)
+        for i in range(1, 7):
+            action = self.create_action(f"Heading {i}", partial(self.insert_header, i))
+            self.header_menu.addAction(action)
+        self.format_menu.addMenu(self.header_menu)
+        self.style_menu = QMenu("Text", self)
+        self.style_menu.addAction(self.create_action("Bold", self.insert_bold))
+        self.style_menu.addAction(self.create_action("Italic", self.insert_italic))
+        self.style_menu.addAction(self.create_action("Underline", self.insert_underline))
+        self.style_menu.addAction(self.create_action("Strikethrough", self.insert_strikethrough))
+        self.format_menu.addMenu(self.style_menu)
+        self.list_menu = QMenu("List", self)
+        self.list_menu.addAction(self.create_action("Ordererd", self.insert_ordered_list))
+        self.list_menu.addAction(self.create_action("Unordered", self.insert_unordered_list))
+        self.format_menu.addMenu(self.list_menu)
 
         self.tools_menu = menubar.addMenu("Tools")
         self.tools_menu.addAction(self.create_action("Word Count", self.word_count, "Ctrl+W"))
@@ -580,6 +606,9 @@ class TextEditor(QMainWindow):
     # =========================
     # INSERTION
     # =========================
+
+    def insert_link(self):
+        pass
 
     def insert_ordered_list(self):
         editor = self.get_current_editor()
@@ -736,12 +765,110 @@ class TextEditor(QMainWindow):
 
         else:
             header = "#" * level + " "
-            stripped = text.lstrip()
+            text = f"{header}{text.lstrip(' #')}"
 
-            if stripped.startswith(header):
-                text = stripped[len(header):]
+        cursor.movePosition(cursor.MoveOperation.StartOfBlock)
+        cursor.movePosition(cursor.MoveOperation.EndOfBlock, cursor.MoveMode.KeepAnchor)
+        cursor.insertText(text)
+
+    #TBD
+    def insert_codeblock(self):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        file_path = self.tabs[editor].file
+        file_suffix = file_path.suffix.lower() if file_path else ''
+        cursor = editor.textCursor()
+
+        line_text = cursor.block().text()
+        if not line_text.strip():
+            return
+
+        text = line_text.strip()
+
+        if file_suffix in (".html", ".ejs"):
+            # <s>text</s> -> text
+            if text.startswith("<pre><code>") and text.endswith("</code></pre>") and len(text) >= 24:
+                text = text[11:-13]
             else:
-                text = f"{header}{text}"
+                text = f"<pre><code>{text}</code></pre>"
+
+        else:
+            # __text__ -> text
+            if text.startswith("```\n") and text.endswith("\n```\n") and len(text) >= 10:
+                text = text[4:-6]
+
+            else:
+                text = f"```\n{text}\n```\n"
+
+        cursor.movePosition(cursor.MoveOperation.StartOfBlock)
+        cursor.movePosition(cursor.MoveOperation.EndOfBlock, cursor.MoveMode.KeepAnchor)
+        cursor.insertText(text)
+
+    def insert_strikethrough(self):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        file_path = self.tabs[editor].file
+        file_suffix = file_path.suffix.lower() if file_path else ''
+        cursor = editor.textCursor()
+
+        line_text = cursor.block().text()
+        if not line_text.strip():
+            return
+
+        text = line_text.strip()
+
+        if file_suffix in (".html", ".ejs"):
+            # <s>text</s> -> text
+            if text.startswith("<s>") and text.endswith("</s>") and len(text) >= 7:
+                text = text[3:-4]
+            else:
+                text = f"<s>{text}</s>"
+
+        else:
+            # __text__ -> text
+            if text.startswith("~~") and text.endswith("~~") and len(text) >= 4:
+                text = text[2:-2]
+
+            else:
+                text = f"~~{text}~~"
+
+        cursor.movePosition(cursor.MoveOperation.StartOfBlock)
+        cursor.movePosition(cursor.MoveOperation.EndOfBlock, cursor.MoveMode.KeepAnchor)
+        cursor.insertText(text)
+
+    def insert_underline(self):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        file_path = self.tabs[editor].file
+        file_suffix = file_path.suffix.lower() if file_path else ''
+        cursor = editor.textCursor()
+
+        line_text = cursor.block().text()
+        if not line_text.strip():
+            return
+
+        text = line_text.strip()
+
+        if file_suffix in (".html", ".ejs"):
+            # <u>text</u> -> text
+            if text.startswith("<u>") and text.endswith("</u>") and len(text) >= 7:
+                text = text[3:-4]
+            else:
+                text = f"<u>{text}</u>"
+
+        else:
+            # __text__ -> text
+            if text.startswith("__") and text.endswith("__") and len(text) >= 4:
+                text = text[2:-2]
+
+            else:
+                text = f"__{text}__"
 
         cursor.movePosition(cursor.MoveOperation.StartOfBlock)
         cursor.movePosition(cursor.MoveOperation.EndOfBlock, cursor.MoveMode.KeepAnchor)
@@ -1449,9 +1576,19 @@ class TextEditor(QMainWindow):
     
     def toggle_autosave(self, state):
         self.autosave_enabled = state
+        self.update_edit_status()
         
     def toggle_readonly(self, state):
         self.readonly_enabled = state
+        self.update_edit_status()
+        
+    def update_edit_status(self):
+        if self.readonly_enabled:
+            self.readonly_status.setText('Readonly')
+        elif self.autosave_enabled:
+            self.readonly_status.setText('Autosaving')
+        else:
+            self.readonly_status.setText('')
     
     def load_app_data(self):
         try:
@@ -1459,8 +1596,8 @@ class TextEditor(QMainWindow):
             app_data = json.loads(app_data_path.read_text(encoding="utf-8")) if app_data_path.exists() else {}
             
             preferences = app_data.get("preferences", {})
-            self.readonly_enabled = preferences.get("readonly", False)
-            self.autosave_enabled = preferences.get("autosave", False)
+            self.toggle_readonly(preferences.get("readonly", False))
+            self.toggle_autosave(preferences.get("autosave", False))
             
             session = app_data.get("session", {})
             self.open_files = [f2 for f2 in [Path(f1) for f1 in session.get("open files", [])] if f2.exists()]
