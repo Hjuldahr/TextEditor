@@ -31,17 +31,6 @@ class TabData:
         self.editor = editor
         self.file = file
         self.saved = saved
-        self.search_state = SearchState()
-
-class SearchState:
-    def __init__(self):
-        self.clear()
-        
-    def clear(self):
-        self.text = ""
-        self.results = []
-        self.index = -1
-        self.suppress_search_refresh = False
 
 class LinkInputDialog(QDialog):
     def __init__(self, parent=None):
@@ -87,10 +76,10 @@ class FindBar(QFrame):
         super().__init__(parent)
         self.timer = QTimer()
         self.timer.setSingleShot(True)
-        self.timer.timeout.connect(self.trigger_search)
+        self.timer.timeout.connect(self.parent().on_search_changed)
         
         self.setFixedWidth(400)
-        self.setFixedHeight(95) # Enough height for two rows + margins
+        self.setFixedHeight(95)
 
         self.setStyleSheet("""
             QFrame { 
@@ -107,34 +96,30 @@ class FindBar(QFrame):
         # --- Row 1: Find ---
         find_layout = QHBoxLayout()
         
-        self.input = QLineEdit()
-        self.input.setPlaceholderText("Find text...")
-        # Re-add: Live search on text change
-        self.input.textEdited.connect(lambda: self.timer.start(150))
-        # Re-add: Enter key moves to next result
-        self.input.returnPressed.connect(self.do_find_next)
+        self.find_input = QLineEdit()
+        self.find_input.setPlaceholderText("Find text...")
+        self.find_input.textEdited.connect(lambda: self.timer.start(150))
 
         self.count = QLabel("0 of 0")
 
         self.btn_prev = QPushButton("🡡")
-        self.btn_prev.clicked.connect(self.do_find_prev) # Re-add
+        self.btn_prev.clicked.connect(self.parent().search_prev)
         
         self.btn_next = QPushButton("🡣")
-        self.btn_next.clicked.connect(self.do_find_next) # Re-add
+        self.btn_next.clicked.connect(self.parent().search_next)
         
         self.btn_select_only = QPushButton("⬚")
         self.btn_select_only.setCheckable(True)
-        self.btn_select_only.clicked.connect(self.trigger_search) # Re-add
+        self.btn_select_only.clicked.connect(self.parent().on_mode_changed)
         
         self.btn_close = QPushButton("X")
-        self.btn_close.clicked.connect(self.close) # Re-add
+        self.btn_close.clicked.connect(self.close)
 
-        # Styling & Focus
         for btn in [self.btn_prev, self.btn_next, self.btn_select_only, self.btn_close]:
             btn.setFixedWidth(30)
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
-        find_layout.addWidget(self.input)
+        find_layout.addWidget(self.find_input)
         find_layout.addWidget(self.count)
         find_layout.addWidget(self.btn_prev)
         find_layout.addWidget(self.btn_next)
@@ -146,16 +131,11 @@ class FindBar(QFrame):
         
         self.replace_input = QLineEdit()
         self.replace_input.setPlaceholderText("Replace with...")
-        # Re-add: Enter key in replace box triggers single replacement
-        self.replace_input.returnPressed.connect(self.do_replace)
 
         self.btn_replace = QPushButton("Replace")
-        self.btn_replace.clicked.connect(self.do_replace) # Re-add
 
         self.btn_replace_all = QPushButton("All")
-        #self.btn_replace_all.clicked.connect(self.do_replace_all) # Re-add
 
-        # Styling & Focus
         for btn in [self.btn_replace, self.btn_replace_all]:
             btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
 
@@ -175,25 +155,20 @@ class FindBar(QFrame):
         self.hide()
 
     def show_bar(self):
-        # Position at top right of the editor
         self.move(self.parent().width() - self.width() - 20, 10)
         self.show()
-        self.input.setFocus()
-        self.trigger_search()
+        self.find_input.setFocus()
+        #self.trigger_search()
         
     def mousePressEvent(self, event):
-        # Capture the initial click position within the widget
         if event.button() == Qt.MouseButton.LeftButton:
             self._drag_pos = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
             event.accept()
 
     def mouseMoveEvent(self, event):
-        # Move the widget based on the mouse delta
         if event.buttons() == Qt.MouseButton.LeftButton and self._drag_pos is not None:
-            # We move it relative to the parent (the main window)
             new_pos = event.globalPosition().toPoint() - self._drag_pos
             
-            # Optional: Constrain it so it doesn't leave the main window
             parent_rect = self.parent().rect()
             if parent_rect.contains(new_pos):
                 self.move(new_pos)
@@ -201,23 +176,97 @@ class FindBar(QFrame):
 
     def mouseReleaseEvent(self, event):
         self._drag_pos = None
-        
-    def trigger_search(self):
-        text = self.input.text()
-        self.parent().search(text)
 
-    def do_find_next(self):
-        self.parent().search_next()
+class SearchController:
+    def __init__(self):
+        self.text = ""
+        self.index = 0
+        self.mode = "global"
+        self.anchor = None    
         
-    def do_find_prev(self):
-        self.parent().search_prev()
-        
-    def do_replace(self):
-        text = self.replace_input.text()
-        self.parent().replace(text)
+        # This can very easily cause a world of pain again (I am betting on it already)
+        self._cached_results = []
+        self._cached_editor = None   
 
-    def trigger_search(self):
-        self.parent().search(self.input.text())
+    def set_query(self, text):
+        if self.text == text:
+            return
+        self.text = text
+        self.index = 0
+        self._cached_results = []
+        self._cached_editor = None
+
+    def set_mode(self, mode, editor=None):
+        self.mode = mode
+        self.index = 0
+        self._cached_results = []
+        self._cached_editor = None
+
+        if mode == "selection" and editor:
+            cursor = editor.textCursor()
+            if cursor.hasSelection():
+                self.anchor = (cursor.selectionStart(), cursor.selectionEnd())
+            else:
+                self.mode = "global"
+                self.anchor = None
+        else:
+            self.anchor = None
+
+    def compute(self, editor):
+        if (
+            editor == self._cached_editor and
+            self.text and
+            self._cached_results is not None
+        ):
+            return self._cached_results
+        
+        if not editor or not self.text:
+            return []
+
+        doc = editor.document()
+        cursor = QTextCursor(doc)
+        results = []
+
+        if self.mode == "selection" and self.anchor:
+            start, end = self.anchor
+            cursor.setPosition(start)
+            
+            search_cursor = QTextCursor(doc)
+            cursor.setPosition(start)
+
+            while True:
+                found = doc.find(self.text, cursor)
+                if found.isNull():
+                    break
+
+                s = found.selectionStart()
+                e = found.selectionEnd()
+
+                if s >= end:
+                    break
+
+                if e > end:
+                    break
+
+                results.append((s, e))
+                cursor = found
+                cursor.setPosition(e)
+        else:
+            cursor.movePosition(QTextCursor.MoveOperation.Start)
+
+            while True:
+                cursor = doc.find(self.text, cursor)
+                if cursor.isNull():
+                    break
+                results.append((cursor.selectionStart(), cursor.selectionEnd()))
+
+        self._cached_results = results
+        self._cached_editor = editor
+        return results
+
+
+
+
 
 class TextEditor(QMainWindow):
     APP_TITLE = "TextEditor"
@@ -283,17 +332,119 @@ class TextEditor(QMainWindow):
         self.rebuild_recent_files()
         
         # Child Widgets
+        self.search_controller = SearchController()
         self.find_bar = FindBar(self)
-        self.clear_search_position_label()
+        
+        #self.clear_search_position_label()
         self.tab_widget.currentChanged.connect(self.on_tab_changed)
         self.on_tab_changed(None)
-
+        
     def format_size(self, size_bytes):
         for unit in ['B', 'KB', 'MB', 'GB', 'TB']:
             if size_bytes < 1024:
                 return f"{size_bytes:.2f} {unit}"
             size_bytes /= 1024
         return f"{size_bytes:.2f} PB"
+
+
+    # TEMP PLACEMENT FOR EASE OF DELETE
+    def clear_search(self): 
+        self.find_bar.find_input.blockSignals(True) 
+        self.find_bar.find_input.clear() 
+        self.find_bar.find_input.blockSignals(False) 
+        
+        # more optimal - clear only previous tab
+        #for tab in self.tabs.values(): 
+        #    tab.editor.setExtraSelections([]) 
+        #    self.clear_search_position_label()
+        
+        editor = self.get_current_editor()
+        editor.setExtraSelections([]) 
+        
+        self.clear_search_position_label()
+    
+    def show_find_bar(self):
+        self.find_bar.show_bar()
+    
+    def on_search_changed(self):
+        self.search_controller.set_query(self.find_bar.find_input.text())
+        self.refresh_search()
+
+    def on_mode_changed(self):
+        mode = "selection" if self.find_bar.btn_select_only.isChecked() else "global"
+        self.search_controller.set_mode(mode, self.get_current_editor())
+        self.refresh_search()
+        
+    def search_next(self):
+        editor = self.get_current_editor()
+        results = self.search_controller.compute(editor)
+        if not results:
+            return
+
+        self.search_controller.index = (self.search_controller.index + 1) % len(results)
+        self._render_search(editor, results, self.search_controller.index)
+        
+    def search_prev(self):
+        editor = self.get_current_editor()
+        results = self.search_controller.compute(editor)
+        if not results:
+            return
+
+        self.search_controller.index = (self.search_controller.index - 1) % len(results)
+        self._render_search(editor, results, self.search_controller.index)
+        
+    def refresh_search(self):
+        editor = self.get_current_editor()
+        results = self.search_controller.compute(editor)
+
+        if not results:
+            editor.setExtraSelections([])
+            self.clear_search_position_label()
+            return
+
+        self.search_controller.index %= len(results)
+
+        self._render_search(editor, results, self.search_controller.index)
+
+    def _render_search(self, editor, results, index):
+        if not results:
+            editor.setExtraSelections([])
+            self.clear_search_position_label()
+            return
+
+        normal = QTextCharFormat()
+        normal.setBackground(QColor("yellow"))
+
+        current = QTextCharFormat()
+        current.setBackground(QColor("orange"))
+
+        extra = []
+        doc = editor.document()
+
+        for i, (start, end) in enumerate(results):
+            cursor = QTextCursor(doc)
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+
+            sel = QTextEdit.ExtraSelection()
+            sel.cursor = cursor
+            sel.format = current if i == index else normal
+            extra.append(sel)
+
+        editor.setExtraSelections(extra)
+        self.update_search_position_label(index, len(results))
+
+        if results:
+            start, end = results[index]
+            cursor = QTextCursor(doc)
+            cursor.setPosition(start)
+            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+
+            scroll_cursor = QTextCursor(cursor)
+            editor.setTextCursor(scroll_cursor)
+            editor.ensureCursorVisible()  
+
+
 
     # =========================
     # TAB SYSTEM
@@ -426,12 +577,6 @@ class TextEditor(QMainWindow):
         
         self.rebuild_recent_files()
 
-    def get_search_state(self):
-        editor = self.get_current_editor()
-        if not editor:
-            return None
-        return self.tabs[editor].search_state
-
     def get_current_editor(self):
         return self.tab_widget.currentWidget()
 
@@ -473,27 +618,14 @@ class TextEditor(QMainWindow):
                 
         return super().eventFilter(obj, event)
     
-    def reset_search_state(self, editor=None):
-        if not editor:
-            editor = self.get_current_editor()
-
-        if not editor:
-            return
-
-        state = self.tabs[editor].search_state
-        state.clear()
-
-        editor.setExtraSelections([])
-        self.clear_search_position_label()
-    
     def on_tab_changed(self, index):
         editor = self.get_current_editor()
         if not editor or editor not in self.tabs:
             return
         
-        text = self.find_bar.input.text()
-        if text:
-            self.search(text)
+        #text = self.find_bar.input.text()
+        #if text:
+        #    self.search(text)
             
         self.on_cursor_moved(editor) # moved across files
         self.update_filesize_status(self.tabs[editor])
@@ -511,10 +643,9 @@ class TextEditor(QMainWindow):
         self.cursor_status.setText(status_text)
         
         if (
-            not self.get_search_state().suppress_search_refresh and
             self.find_bar.isVisible() and
             self.find_bar.btn_select_only.isChecked() and
-            self.find_bar.input.text()
+            self.find_bar.find_input.text()
         ):
             self.find_bar.timer.start(100)
     
@@ -578,8 +709,8 @@ class TextEditor(QMainWindow):
         self.edit_menu.addAction(self.create_action("Paste", lambda: self.get_current_editor().paste(), "Ctrl+V"))
 
         self.edit_menu.addSeparator()
-        self.edit_menu.addAction(self.create_action("Find / Replace", self.find, "Ctrl+F"))
-        self.edit_menu.addAction(self.create_action("Find By Selection", self.find_by_selection))
+        self.edit_menu.addAction(self.create_action("Find / Replace", self.show_find_bar, "Ctrl+F"))
+        #self.edit_menu.addAction(self.create_action("Find By Selection", self.find_by_selection))
         #self.edit_menu.addAction(self.create_action("Find Across Files", self.all_file_find, "Ctrl+Shift+F"))
         self.edit_menu.addAction(self.create_action("Goto Line", self.goto, "Ctrl+G"))
 
@@ -1084,220 +1215,12 @@ class TextEditor(QMainWindow):
                 cursor.setPosition(new_pos) 
                 editor.setTextCursor(cursor) 
                 editor.ensureCursorVisible()
-
-    def find_by_selection(self):
-        editor = self.get_current_editor()
-        selected = editor.textCursor().selectedText().replace('\u2029', '\n')
-
-        if not selected.strip():
-            return
-        
-        self.find_bar.show_bar()
-        self.find_bar.input.setText(selected)
-        self.search(selected)
-
-    def find(self):
-        self.find_bar.show_bar()
-        
-    def clear_search(self):
-        self.find_bar.input.blockSignals(True)
-        self.find_bar.input.clear()
-        self.find_bar.input.blockSignals(False)
-
-        for tab in self.tabs.values():
-            tab.editor.setExtraSelections([])
-
-        self.clear_search_position_label()
-        
-    def search(self, text):
-        editor = self.get_current_editor()
-        if not editor:
-            return
-
-        self.get_search_state().text = text
-
-        if not text:
-            self.clear_search()
-            return
-
-        doc = editor.document()
-        results = []
-
-        cursor = editor.textCursor()
-
-        # Selection mode toggle
-        if self.find_bar.btn_select_only.isChecked() and cursor.hasSelection():
-            start = cursor.selectionStart()
-            end = cursor.selectionEnd()
-
-            cursor = QTextCursor(doc)
-            cursor.setPosition(start)
-
-            while True:
-                cursor = doc.find(text, cursor)
-                if cursor.isNull():
-                    break
-
-                s = cursor.selectionStart()
-                e = cursor.selectionEnd()
-
-                if s >= end:
-                    break
-
-                # only include matches fully inside selection
-                if e <= end:
-                    results.append((s, e))
-        else:
-            # normal full-document search
-            cursor = QTextCursor(doc)
-            cursor.movePosition(QTextCursor.MoveOperation.Start)
-
-            while True:
-                cursor = doc.find(text, cursor)
-                if cursor.isNull():
-                    break
-                results.append((cursor.selectionStart(), cursor.selectionEnd()))
-
-        self.get_search_state().results = results
-        self.get_search_state().index = 0 if results else -1
-
-        self.apply_highlights()
-
-        if results:
-            self.update_search_position_label(0, len(results))
-        else:
-            self.clear_search_position_label()
-        
-    def search_next(self):
-        r = self.get_search_state().results
-        if not r:
-            return
-        self.get_search_state().index = (self.get_search_state().index + 1) % len(r)
-        self.jump()
-
-    def search_prev(self):
-        r = self.get_search_state().results
-        if not r:
-            return
-        self.get_search_state().index = (self.get_search_state().index - 1) % len(r)
-        self.jump()    
-    
-    @contextmanager
-    def suppress_search(self):
-        self.get_search_state().suppress_search_refresh = True
-        try:
-            yield
-        finally:
-            self.get_search_state().suppress_search_refresh = False
-    
-    def replace(self, text):
-        editor = self.get_current_editor()
-        if not editor:
-            return
-
-        r = self.get_search_state().results
-        i = self.get_search_state().index
-
-        if i < 0 or i >= len(r):
-            return
-
-        start, end = r[i]
-
-        doc = editor.document()
-        doc_len = doc.characterCount() - 1
-
-        if start < 0 or end > doc_len:
-            return
-
-        cursor = QTextCursor(doc)
-        cursor.setPosition(start)
-        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
-
-        cursor.insertText(text)
-
-        self.search(self.get_search_state().text)
-        #self.search_next() # DONT USE, causes a double step
-    
-    def jump(self):
-        editor = self.get_current_editor()
-        if not editor:
-            return
-
-        r = self.get_search_state().results
-        i = self.get_search_state().index
-
-        if i < 0 or i >= len(r):
-            return
-
-        start, end = r[i]
-
-        doc = editor.document()
-        doc_len = doc.characterCount() - 1
-
-        if start < 0 or end > doc_len:
-            return
-
-        cursor = QTextCursor(doc)
-        cursor.setPosition(start)
-        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
-
-        with self.suppress_search():
-            editor.setTextCursor(cursor)
-    
-        editor.ensureCursorVisible()
-
-        self.apply_highlights()
-        self.update_search_position_label(i, len(r))
     
     def clear_search_position_label(self):
         self.find_bar.count.setText('No results')
         
     def update_search_position_label(self, i, n):
         self.find_bar.count.setText(f'{i+1} of {n}')
-    
-    def apply_highlights(self):
-        editor = self.get_current_editor()
-        if not editor:
-            return
-
-        state = self.get_search_state()
-        if not state.text or not state.results:
-            editor.setExtraSelections([])
-            return
-
-        results = state.results
-        if not results:
-            editor.setExtraSelections([])
-            return
-
-        normal = QTextCharFormat()
-        normal.setBackground(QColor("yellow"))
-
-        current = QTextCharFormat()
-        current.setBackground(QColor("orange"))
-
-        extra = []
-        idx = self.get_search_state().index
-
-        doc = editor.document()
-
-        for i, (start, end) in enumerate(results):
-            cursor = QTextCursor(doc)
-            cursor.setPosition(start)
-            cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
-
-            sel = QTextEdit.ExtraSelection()
-            sel.cursor = cursor
-            sel.format = current if i == idx else normal
-            extra.append(sel)
-
-        editor.setExtraSelections(extra)
-    
-    def all_file_find(self):
-        pass
-    
-    def all_file_replace(self):
-        pass
 
     # =========================
     # RECENT FILE MENU
