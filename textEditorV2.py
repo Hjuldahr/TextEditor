@@ -1,9 +1,6 @@
-#TODO time opened tracking for recent files
-
 from contextlib import contextmanager
 from datetime import datetime
 from functools import partial
-import itertools
 import sys
 import json
 import re
@@ -12,7 +9,7 @@ import webbrowser
 from pathlib import Path
 from urllib.parse import quote
 
-from PyQt6.QtWidgets import QApplication, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QPushButton, QTextEdit, QTabWidget, QFileDialog, QMessageBox, QMenu, QVBoxLayout
+from PyQt6.QtWidgets import QApplication, QDialog, QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMainWindow, QPushButton, QTextEdit, QTabWidget, QFileDialog, QMessageBox, QMenu, QVBoxLayout
 from PyQt6.QtGui import QAction, QColor, QFont, QKeySequence, QTextCharFormat, QTextCursor, QTextDocument
 from PyQt6.QtCore import QEvent, QTimer, Qt
 import timeago
@@ -37,22 +34,53 @@ class TabData:
         self.search_state = SearchState()
 
 class SearchState:
-    DEFAULT_TEXT = ""
-    DEFAULT_RESULTS = []
-    DEFAULT_INDEX = -1
-    DEFAULT_SUPPRESS = False
-    
     def __init__(self):
-        self.text = self.DEFAULT_TEXT
-        self.results = self.DEFAULT_RESULTS
-        self.index = self.DEFAULT_INDEX
-        self.suppress_search_refresh = self.DEFAULT_SUPPRESS
+        self.clear()
         
     def clear(self):
-        self.text = self.DEFAULT_TEXT
-        self.results = self.DEFAULT_RESULTS
-        self.index = self.DEFAULT_INDEX
-        self.suppress_search_refresh = self.DEFAULT_SUPPRESS
+        self.text = ""
+        self.results = []
+        self.index = -1
+        self.suppress_search_refresh = False
+
+class LinkInputDialog(QDialog):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Generate Hyperlink")
+
+        # 1. Setup Layout
+        layout = QVBoxLayout(self)
+        form_layout = QFormLayout()
+        
+        # 2. Setup Inputs
+        self.display_text = QLineEdit(self)
+        self.display_text.setPlaceholderText("e.g., Google")
+        
+        self.url_value = QLineEdit(self)
+        self.url_value.setPlaceholderText("e.g., https://google.com")
+
+        form_layout.addRow("Text:", self.display_text)
+        form_layout.addRow("URL:", self.url_value)
+        layout.addLayout(form_layout)
+
+        # 3. Add OK/Cancel Buttons
+        self.buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel, 
+            self
+        )
+        layout.addWidget(self.buttons)
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+
+    def get_link_html(self):
+        text = self.display_text.text()
+        url = self.url_value.text()
+        return f'<a href="{url}">{text}</a>'
+    
+    def get_link_md(self):
+        text = self.display_text.text()
+        url = self.url_value.text()
+        return f'[{text}]({url})'
 
 class FindBar(QFrame):
     def __init__(self, parent=None):
@@ -125,7 +153,7 @@ class FindBar(QFrame):
         self.btn_replace.clicked.connect(self.do_replace) # Re-add
 
         self.btn_replace_all = QPushButton("All")
-        self.btn_replace_all.clicked.connect(self.do_replace_all) # Re-add
+        #self.btn_replace_all.clicked.connect(self.do_replace_all) # Re-add
 
         # Styling & Focus
         for btn in [self.btn_replace, self.btn_replace_all]:
@@ -145,16 +173,6 @@ class FindBar(QFrame):
     def close(self):
         self.parent().clear_search()
         self.hide()
-
-    def do_find_next(self):
-        text = self.input.text()
-        #self.parent().smart_search(text)
-        self.parent().search_next()
-        
-    def do_find_prev(self):
-        text = self.input.text()
-        #self.parent().smart_search(text)
-        self.parent().search_prev()
 
     def show_bar(self):
         # Position at top right of the editor
@@ -187,20 +205,16 @@ class FindBar(QFrame):
     def trigger_search(self):
         text = self.input.text()
         self.parent().search(text)
-        
-    def do_replace(self):
-        # Calls the parent TextEditor method
-        self.parent().replace_current(self.replace_input.text())
-
-    def do_replace_all(self):
-        # Calls the parent TextEditor method
-        self.parent().replace_all(self.replace_input.text())
 
     def do_find_next(self):
         self.parent().search_next()
         
     def do_find_prev(self):
         self.parent().search_prev()
+        
+    def do_replace(self):
+        text = self.replace_input.text()
+        self.parent().replace(text)
 
     def trigger_search(self):
         self.parent().search(self.input.text())
@@ -459,6 +473,19 @@ class TextEditor(QMainWindow):
                 
         return super().eventFilter(obj, event)
     
+    def reset_search_state(self, editor=None):
+        if not editor:
+            editor = self.get_current_editor()
+
+        if not editor:
+            return
+
+        state = self.tabs[editor].search_state
+        state.clear()
+
+        editor.setExtraSelections([])
+        self.clear_search_position_label()
+    
     def on_tab_changed(self, index):
         editor = self.get_current_editor()
         if not editor or editor not in self.tabs:
@@ -608,7 +635,21 @@ class TextEditor(QMainWindow):
     # =========================
 
     def insert_link(self):
-        pass
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        file_path = self.tabs[editor].file
+        file_suffix = file_path.suffix.lower() if file_path else ''
+        
+        dialog = LinkInputDialog()
+        if dialog.exec():
+            if file_suffix in (".html", ".ejs"):
+                text = dialog.get_link_html()
+            else:
+                text = dialog.get_link_md()
+                
+            editor.insertPlainText(text)
 
     def insert_ordered_list(self):
         editor = self.get_current_editor()
@@ -669,10 +710,11 @@ class TextEditor(QMainWindow):
 
         file_path = self.tabs[editor].file
         file_suffix = file_path.suffix.lower() if file_path else ''
-        cursor = editor.textCursor()
         
-        data = [[], [], []]
-        use_first_row_as_header = True
+        # WIP
+        data = QInputDialog.getText(self, "Input", "Enter text:")
+        data = [[], [], []] #csv like
+        use_first_row_as_header = True # bool
 
         if file_suffix in (".html", ".ejs"):
             table_rows = []
@@ -731,7 +773,7 @@ class TextEditor(QMainWindow):
 
             text = '\n'.join(table_rows)
 
-        cursor.insertText(text)
+        editor.insertPlainText(text)
 
     def insert_header(self, level):
         editor = self.get_current_editor()
@@ -1148,6 +1190,34 @@ class TextEditor(QMainWindow):
         finally:
             self.get_search_state().suppress_search_refresh = False
     
+    def replace(self, text):
+        editor = self.get_current_editor()
+        if not editor:
+            return
+
+        r = self.get_search_state().results
+        i = self.get_search_state().index
+
+        if i < 0 or i >= len(r):
+            return
+
+        start, end = r[i]
+
+        doc = editor.document()
+        doc_len = doc.characterCount() - 1
+
+        if start < 0 or end > doc_len:
+            return
+
+        cursor = QTextCursor(doc)
+        cursor.setPosition(start)
+        cursor.setPosition(end, QTextCursor.MoveMode.KeepAnchor)
+
+        cursor.insertText(text)
+
+        self.search(self.get_search_state().text)
+        #self.search_next() # DONT USE, causes a double step
+    
     def jump(self):
         editor = self.get_current_editor()
         if not editor:
@@ -1222,9 +1292,6 @@ class TextEditor(QMainWindow):
             extra.append(sel)
 
         editor.setExtraSelections(extra)
-                
-    def replace(self):
-        pass
     
     def all_file_find(self):
         pass
